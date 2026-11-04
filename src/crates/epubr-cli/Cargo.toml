@@ -1,0 +1,13 @@
+[package]
+name = "epubr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "epubr-docling-probe"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+epubr-core.workspace = true
