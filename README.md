@@ -3,12 +3,30 @@
 Epubr is a Rust workspace for converting technical PDFs to reflowable EPUB 3.
 
 The CLI downloads and verifies pinned Docling assets on first use, then reuses
-the verified cache offline. It reports progress on stderr and publishes the EPUB
-when conversion succeeds. Press Ctrl-C to cancel.
+the verified cache offline. It shows a progress bar with the latest status or
+diagnostic on terminal stderr and publishes the EPUB when conversion succeeds.
+Press Ctrl-C to cancel.
 
 ```sh
-just release
-./target/release/epubr convert raw/hard.pdf -o hard.epub --model technical
+just build
+just test
+just install
+```
+
+## Examples
+
+For a formula-heavy technical book, use the technical model for formula
+enrichment and automatic OCR for pages that need it.
+
+```sh
+epubr convert raw/hard.pdf -o hard-technical.epub --model technical --mode auto
+```
+
+To check equation fidelity before converting the whole book, preview a
+formula-heavy range and compare the EPUB with the PDF.
+
+```sh
+epubr convert raw/hard.pdf -o hard-technical-preview.epub --model technical --mode auto --pages 172-176
 ```
 
 - `--mode auto` uses OCR as needed, `--mode text` uses the PDF's text layer,
@@ -24,11 +42,15 @@ just release
   `$XDG_CACHE_HOME/epubr` or `~/.cache/epubr`, and on macOS,
   `~/Library/Caches/epubr`).
 - `EPUBR_MODEL` and `EPUBR_MODEL_DIR` set defaults for the corresponding flags.
-- `--quiet` suppresses progress output.
+- `--debug` streams progress and Docling diagnostics to stderr. Use it before
+  or after `convert`.
+- `--quiet` suppresses progress and the completion message. It conflicts with
+  `--debug`.
 
-Use `just debug convert raw/hard.pdf -o hard-preview.epub --pages 172-176`
-for a short debug run. The separate `epubr-docling-probe` binary still emits
-Docling JSON for extraction diagnostics.
+Use `just release` to build optimized binaries in `target/release`.
+`just debug convert raw/hard.pdf -o hard-preview.epub --pages 172-176` runs a
+short conversion with debug logs. The separate `epubr-docling-probe` binary
+emits Docling JSON for extraction diagnostics.
 
 ## Core conversion
 

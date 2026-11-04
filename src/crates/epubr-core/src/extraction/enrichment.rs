@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use docling_pdf::enrich::{CodeFormula, CodeFormulaKind, extract_code_language};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{EXTRACTION_WORKER_FLAG, Worker};
+use super::{EXTRACTION_WORKER_FLAG, ExtractionWorker, Worker};
 use crate::{CancellationToken, ConversionError, PreparedModels, Progress, book::SourceCrops};
 
 pub(super) const FLAG: &str = "--enrich";
@@ -27,7 +27,7 @@ enum Response {
 pub(super) fn enrich(
     document: &mut Value,
     input: &Path,
-    worker: &Path,
+    worker: &ExtractionWorker<'_>,
     models: &PreparedModels,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress),
@@ -130,20 +130,13 @@ struct Decoder {
 }
 
 impl Decoder {
-    fn start(input: &Path, worker: &Path, models: &PreparedModels) -> io::Result<Self> {
-        let mut command = Command::new(worker);
-        command
-            .args([EXTRACTION_WORKER_FLAG, FLAG])
-            .arg(input)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-
-            command.process_group(0);
-        }
-        models.configure_command(&mut command);
+    fn start(
+        input: &Path,
+        worker: &ExtractionWorker<'_>,
+        models: &PreparedModels,
+    ) -> io::Result<Self> {
+        let mut command = worker.command(models)?;
+        command.args([EXTRACTION_WORKER_FLAG, FLAG]).arg(input);
         Self::spawn(&mut command)
     }
 
@@ -250,6 +243,8 @@ pub(super) fn worker_main(input: &OsStr) -> Result<(), Box<dyn std::error::Error
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::process::Stdio;
+
     use super::*;
 
     #[test]

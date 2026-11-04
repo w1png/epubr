@@ -1,15 +1,16 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Mutex;
 
 use clap::Parser;
 use epubr_core::{
-    CancellationToken, ExtractionOptions, ModelConfig, ModelProfile, extract_profile,
+    CancellationToken, ExtractionOptions, ModelConfig, ModelProfile, Progress, extract_profile,
 };
 
 mod common;
 
-use common::{Mode, ProgressReporter, parse_pages};
+use common::{Mode, parse_pages};
 
 #[derive(Parser)]
 #[command(version, about = "Validate the linked Docling PDF extractor")]
@@ -93,4 +94,61 @@ fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .map_or(ExitCode::FAILURE, ExitCode::from))
+}
+
+#[derive(Default)]
+pub(crate) struct ProgressReporter {
+    downloads: HashMap<&'static str, u64>,
+    pages: usize,
+}
+
+impl ProgressReporter {
+    pub(crate) fn report(&mut self, progress: Progress) {
+        const DOWNLOAD_INTERVAL: u64 = 16 * 1024 * 1024;
+        const PAGE_INTERVAL: usize = 10;
+
+        match progress {
+            Progress::ModelDownload {
+                asset,
+                downloaded,
+                total,
+            } => {
+                let previous = self.downloads.get(asset).copied();
+                let finished = total == Some(downloaded) && previous != Some(downloaded);
+                let advanced = previous
+                    .is_none_or(|bytes| downloaded.saturating_sub(bytes) >= DOWNLOAD_INTERVAL);
+                if finished || advanced {
+                    self.downloads.insert(asset, downloaded);
+                    match total {
+                        Some(total) => eprintln!("Downloading {asset}: {downloaded}/{total} bytes"),
+                        None => eprintln!("Downloading {asset}: {downloaded} bytes"),
+                    }
+                }
+            }
+            Progress::Started => eprintln!("Extracting PDF"),
+            Progress::Page {
+                completed,
+                total,
+                page,
+                success,
+            } => {
+                if !success {
+                    eprintln!("Page {page} extraction failed");
+                }
+                let due = self.pages == 0
+                    || completed == total
+                    || completed >= self.pages + PAGE_INTERVAL;
+                if completed > self.pages && due {
+                    self.pages = completed;
+                    eprintln!("Extracting PDF: {completed}/{total} pages processed");
+                }
+            }
+            Progress::Finished => eprintln!("Extraction finished"),
+            Progress::Enrichment { completed, total } => {
+                if completed == total || completed.is_multiple_of(PAGE_INTERVAL) {
+                    eprintln!("Decoding code and formulas: {completed}/{total} regions processed");
+                }
+            }
+        }
+    }
 }

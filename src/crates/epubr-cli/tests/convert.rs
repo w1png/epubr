@@ -64,3 +64,53 @@ fn convert_preserves_an_existing_destination() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("destination already exists"));
     assert_eq!(std::fs::read(&destination).unwrap(), b"existing file");
 }
+
+#[test]
+fn debug_streams_progress_with_redirected_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../epubr-core/tests/fixtures/basic.pdf");
+
+    for debug in [false, true] {
+        let mut command = epubr();
+        if debug {
+            command.arg("--debug");
+        }
+        let output = command
+            .arg("convert")
+            .arg(&fixture)
+            .arg("-o")
+            .arg(root.path().join("out.epub"))
+            .args(["--model", "standard", "--models"])
+            .arg(root.path().join("missing-models"))
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(
+            stderr.contains("could not prepare Docling models"),
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("Preparing standard models"),
+            debug,
+            "{stderr}"
+        );
+        assert!(!stderr.contains('\x1b'), "{stderr}");
+    }
+}
+
+#[test]
+fn debug_conflicts_with_quiet_before_and_after_the_subcommand() {
+    let convert = ["convert", "missing.pdf", "-o", "output.epub", "--quiet"];
+    for arguments in [
+        [&["--debug"][..], &convert].concat(),
+        [&convert[..], &["--debug"]].concat(),
+    ] {
+        let output = epubr().args(arguments).output().unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+    }
+}

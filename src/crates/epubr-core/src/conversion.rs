@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::extraction::extract_for_conversion;
+use crate::extraction::{ExtractionWorker, extract_for_conversion};
 use crate::{ExtractionError, ExtractionOptions, ModelConfig, ModelError, OcrMode, Progress};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -116,6 +116,30 @@ pub fn convert_with_worker(
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {
+    convert_with_worker_setup(
+        input,
+        output,
+        options,
+        models,
+        &ExtractionWorker {
+            executable: worker,
+            setup: &|_| Ok(()),
+        },
+        cancellation,
+        on_progress,
+    )
+}
+
+#[doc(hidden)]
+pub fn convert_with_worker_setup(
+    input: &Path,
+    output: &Path,
+    options: ConversionOptions,
+    models: &ModelConfig,
+    worker: &ExtractionWorker<'_>,
+    cancellation: &CancellationToken,
+    on_progress: impl Fn(Progress) + Sync,
+) -> Result<ConversionReport, ConversionError> {
     convert_inner(
         input,
         output,
@@ -132,7 +156,7 @@ fn convert_inner(
     output: &Path,
     options: ConversionOptions,
     models: Option<&ModelConfig>,
-    worker: Option<&Path>,
+    worker: Option<&ExtractionWorker<'_>>,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {

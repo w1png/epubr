@@ -6,12 +6,14 @@ mod epub;
 mod extraction;
 mod models;
 
+#[doc(hidden)]
+pub use conversion::convert_with_worker_setup;
 pub use conversion::{
     CancellationToken, ConversionError, ConversionOptions, ConversionReport, convert,
     convert_with_models, convert_with_worker,
 };
 #[doc(hidden)]
-pub use extraction::{EXTRACTION_WORKER_FLAG, run_extraction_worker};
+pub use extraction::{EXTRACTION_WORKER_FLAG, ExtractionWorker, run_extraction_worker};
 pub use models::{ModelConfig, ModelError, ModelProfile, PreparedModels};
 
 use std::fmt;

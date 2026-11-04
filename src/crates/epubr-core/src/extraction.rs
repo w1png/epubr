@@ -13,11 +13,33 @@ use serde_json::Value;
 
 use crate::{
     CancellationToken, ConversionError, Extracted, ExtractionError, ExtractionOptions, ModelConfig,
-    ModelError, ModelProfile, OcrMode, Progress, extract_profile,
+    ModelError, ModelProfile, OcrMode, PreparedModels, Progress, extract_profile,
 };
 
 const WORKER_NAME: &str = "epubr-extract-worker";
 pub const EXTRACTION_WORKER_FLAG: &str = "--epubr-extraction-worker";
+
+pub struct ExtractionWorker<'a> {
+    pub executable: &'a Path,
+    /// Configure stderr and environment for each worker process.
+    pub setup: &'a dyn Fn(&mut Command) -> io::Result<()>,
+}
+
+impl ExtractionWorker<'_> {
+    fn command(&self, models: &PreparedModels) -> io::Result<Command> {
+        let mut command = Command::new(self.executable);
+        models.configure_command(&mut command);
+        (self.setup)(&mut command)?;
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            command.process_group(0);
+        }
+        Ok(command)
+    }
+}
 
 #[derive(Deserialize, Serialize)]
 enum WorkerEvent {
@@ -45,14 +67,18 @@ pub(crate) fn extract_for_conversion(
     pdf: &lopdf::Document,
     options: ExtractionOptions,
     models: &ModelConfig,
-    worker: Option<&Path>,
+    worker: Option<&ExtractionWorker<'_>>,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<(Value, Vec<String>), ConversionError> {
     let input = input.canonicalize().map_err(ConversionError::Io)?;
-    let worker = match worker {
-        Some(path) => path.canonicalize()?,
+    let executable = match worker {
+        Some(worker) => worker.executable.canonicalize()?,
         None => worker_path()?,
+    };
+    let worker = ExtractionWorker {
+        executable: &executable,
+        setup: worker.map_or(&|_| Ok(()), |worker| worker.setup),
     };
     let prepared = models
         .prepare(cancellation, &on_progress)
@@ -60,29 +86,16 @@ pub(crate) fn extract_for_conversion(
             ModelError::Cancelled => ConversionError::Cancelled,
             error => ConversionError::Models(error),
         })?;
-    let mut command = Command::new(&worker);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-
-        command.process_group(0);
-    }
+    let mut command = worker.command(&prepared)?;
     let mode = match options.mode {
         OcrMode::Auto => "auto",
         OcrMode::Text => "text",
         OcrMode::Scan => "scan",
     };
-    command
-        .arg(EXTRACTION_WORKER_FLAG)
-        .arg(&input)
-        .arg(mode)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+    command.arg(EXTRACTION_WORKER_FLAG).arg(&input).arg(mode);
     if let Some((first, last)) = options.pages {
         command.arg(first.to_string()).arg(last.to_string());
     }
-    prepared.configure_command(&mut command);
-
     cancellation.check()?;
     let extracted = receive_progress(&mut command, cancellation, &on_progress)?;
     let mut document: Value =
