@@ -77,6 +77,9 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     }
     for block in &book.blocks {
         match block {
+            Block::PageAnchor { page } => {
+                writeln!(content, "<span id=\"source-page-{page}\"></span>").unwrap();
+            }
             Block::Heading { level, id, text } => {
                 let level = (*level).clamp(1, 6);
                 writeln!(

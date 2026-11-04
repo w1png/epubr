@@ -949,7 +949,8 @@ mod tests {
                 {"$ref": "#/texts/0"}, {"$ref": "#/texts/1"}, {"$ref": "#/texts/2"}
             ]},
             "texts": [
-                {"self_ref": "#/texts/0", "text": "Before", "prov": location(510, 485)},
+                {"self_ref": "#/texts/0", "label": "text",
+                    "text": "The following formula negates only A.", "prov": location(510, 485)},
                 {"self_ref": "#/texts/1", "text": "<!-- formula-not-decoded -->"},
                 {"self_ref": "#/texts/2", "text": "After", "prov": location(391, 380)}
             ]

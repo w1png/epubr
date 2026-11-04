@@ -8,7 +8,7 @@ mod reflow;
 mod structure;
 mod symbols;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -43,6 +43,9 @@ pub(crate) struct ListItem {
 }
 
 pub(crate) enum Block {
+    PageAnchor {
+        page: u64,
+    },
     Contents {
         title: String,
     },
@@ -153,12 +156,13 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
     let mut texts: Vec<_> = items.iter().map(|item| reflow.text(item)).collect();
     let numbering = lists::recover_numbering(&items, &mut texts);
     let notes = notes::link_notes(&items, &texts, &mut book.warnings);
-    let contents = structure::printed_contents(&items);
+    let contents = structure::printed_contents(&items, pdf, input);
     let figure_labels = structure::figure_labels(&items);
     let mut geometry = math::PageGeometry::new(pdf, input);
     let mut crops = math::SourceCrops::new(input);
     let mut source_code = code::SourceCode::new(input);
     let mut headings = Vec::new();
+    let mut page_starts = HashMap::new();
     let mut previous_prose: Option<(&Value, usize)> = None;
     let mut list_run = None;
     for (index, (item, text)) in items.iter().zip(texts).enumerate() {
@@ -174,6 +178,10 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
         }
         if contents.contains(index) || figure_labels.contains(&index) {
             continue;
+        }
+        let page = page_no(item);
+        if page > 0 {
+            page_starts.entry(page).or_insert(book.blocks.len());
         }
         match label(item) {
             "section_header" | "title" if !text.is_empty() => {
@@ -362,7 +370,7 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
             _ => {}
         }
     }
-    book.navigation = contents.navigation(&book.blocks, &headings);
+    book.navigation = contents.navigation(&mut book.blocks, &headings, &page_starts);
     if book.navigation.is_empty() {
         book.navigation = outline_navigation(pdf, &book.blocks, &headings);
     }

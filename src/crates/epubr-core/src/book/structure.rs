@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
+use docling_pdf::textparse::PageTextParser;
+use lopdf::{Document, TocType};
 use serde_json::Value;
 
 use super::{Block, NavEntry, get_ref, item_text, label, page_no};
@@ -89,6 +92,7 @@ pub(super) struct PrintedContents {
     hidden: HashSet<usize>,
     marker: Option<usize>,
     entries: Vec<PrintedEntry>,
+    outline: Vec<TocType>,
 }
 
 #[derive(Default)]
@@ -112,7 +116,15 @@ impl PrintedContents {
         self.hidden.contains(&index)
     }
 
-    pub(super) fn navigation(&self, blocks: &[Block], headings: &[(u64, usize)]) -> Vec<NavEntry> {
+    pub(super) fn navigation(
+        &self,
+        blocks: &mut Vec<Block>,
+        headings: &[(u64, usize)],
+        page_starts: &HashMap<u64, usize>,
+    ) -> Vec<NavEntry> {
+        if !self.outline.is_empty() {
+            return bookmark_navigation(&self.outline, blocks, headings, page_starts);
+        }
         let mut by_title = HashMap::<_, Vec<_>>::new();
         for &(page, index) in headings {
             if let Block::Heading { level, id, text } = &blocks[index] {
@@ -147,7 +159,10 @@ impl PrintedContents {
     }
 }
 
-pub(super) fn printed_contents(items: &[&Value]) -> PrintedContents {
+pub(super) fn printed_contents(items: &[&Value], pdf: &Document, input: &Path) -> PrintedContents {
+    if let Some(contents) = contents_from_bookmarks(items, pdf, input) {
+        return contents;
+    }
     let heading_titles: HashSet<_> = items
         .iter()
         .filter(|item| heading(item))
@@ -201,7 +216,159 @@ pub(super) fn printed_contents(items: &[&Value]) -> PrintedContents {
         hidden,
         marker,
         entries,
+        outline: Vec::new(),
     }
+}
+
+fn contents_from_bookmarks(
+    items: &[&Value],
+    pdf: &Document,
+    input: &Path,
+) -> Option<PrintedContents> {
+    let toc = pdf.get_toc().ok()?.toc;
+    let (index, bookmark) = toc.iter().enumerate().find(|(_, entry)| {
+        (1..=40).contains(&entry.page)
+            && (contents_title(&entry.title) || title_key(&entry.title) == "toc")
+    })?;
+    let first = bookmark.page;
+    let end = toc[index + 1..]
+        .iter()
+        .find(|entry| entry.level <= bookmark.level && entry.page > first)?
+        .page;
+    if !(2..=16).contains(&(end - first)) {
+        return None;
+    }
+    let pages = first as u64..end as u64;
+    let marker = items.iter().position(|item| {
+        page_no(item) == pages.start && heading(item) && contents_title(&item_text(item))
+    })?;
+    let outline: Vec<_> = toc.into_iter().filter(|entry| entry.page >= end).collect();
+    if outline.len() < 4
+        || !items.iter().any(|item| {
+            !matches!(label(item), "page_header" | "page_footer")
+                && outline
+                    .iter()
+                    .any(|entry| entry.page as u64 == page_no(item))
+        })
+    {
+        return None;
+    }
+    // PDF bookmarks bound the candidate section. Confirm the actual printed
+    // pages independently, since extraction can label them as pictures,
+    // tables, or a mixture of unrelated-looking blocks.
+    let bytes = std::fs::read(input).ok()?;
+    let mut parser = PageTextParser::open(&bytes)?;
+    let mut contents_pages = 0;
+    for page in first..end {
+        let source = parser.text_page(page - 1);
+        if source.cells.is_empty() {
+            continue;
+        }
+        let leaders = source
+            .cells
+            .iter()
+            .filter(|cell| {
+                let compact: String = cell.text.chars().filter(|ch| !ch.is_whitespace()).collect();
+                compact.contains("...") || compact.contains('…')
+            })
+            .count();
+        if leaders < 4 {
+            return None;
+        }
+        contents_pages += 1;
+    }
+    if contents_pages < 2 {
+        return None;
+    }
+    Some(PrintedContents {
+        hidden: items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| pages.contains(&page_no(item)).then_some(index))
+            .collect(),
+        marker: Some(marker),
+        entries: Vec::new(),
+        outline,
+    })
+}
+
+fn bookmark_navigation(
+    outline: &[TocType],
+    blocks: &mut Vec<Block>,
+    headings: &[(u64, usize)],
+    page_starts: &HashMap<u64, usize>,
+) -> Vec<NavEntry> {
+    let mut anchors = HashSet::new();
+    let entries = outline
+        .iter()
+        .filter_map(|entry| {
+            let page = entry.page as u64;
+            let block = *page_starts.get(&page)?;
+            let key = title_key(&entry.title);
+            let short_key = title_key(without_section_number(&entry.title));
+            let headings_on_page = headings.iter().filter_map(|&(source_page, index)| {
+                if source_page == page
+                    && let Block::Heading { text, id, .. } = &blocks[index]
+                {
+                    Some((text.as_str(), id))
+                } else {
+                    None
+                }
+            });
+            let exact = unique(
+                headings_on_page
+                    .clone()
+                    .filter(|(text, _)| title_key(text) == key),
+            );
+            let matched =
+                exact
+                    .or_else(|| {
+                        unique(headings_on_page.clone().filter(|(text, _)| {
+                            title_key(without_section_number(text)) == short_key
+                        }))
+                    })
+                    .or_else(|| {
+                        // A PDF outline can use a different wording for a
+                        // numbered section on the same page.
+                        let (number, _) = split_section_number(&entry.title)?;
+                        number.contains('.').then_some(())?;
+                        unique(headings_on_page.filter(|(text, _)| {
+                            split_section_number(text).is_some_and(|(value, _)| value == number)
+                        }))
+                    });
+            let id = matched.map_or_else(
+                || {
+                    anchors.insert((block, page));
+                    format!("source-page-{page}")
+                },
+                |(_, id)| id.clone(),
+            );
+            Some(NavEntry {
+                level: entry.level.clamp(1, 6) as u8,
+                id,
+                text: super::clean_text(&entry.title),
+            })
+        })
+        .collect();
+    let mut anchors: Vec<_> = anchors.into_iter().collect();
+    anchors.sort_unstable_by(|a, b| b.cmp(a));
+    for (index, page) in anchors {
+        blocks.insert(index, Block::PageAnchor { page });
+    }
+    entries
+}
+
+fn without_section_number(title: &str) -> &str {
+    split_section_number(title).map_or(title, |(_, rest)| rest)
+}
+
+fn split_section_number(title: &str) -> Option<(&str, &str)> {
+    let (number, rest) = title.split_once(char::is_whitespace)?;
+    let number = number.trim_end_matches('.');
+    number
+        .split('.')
+        .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
+        .then_some((number, rest.trim_start()))
 }
 
 fn contents_title(title: &str) -> bool {
@@ -422,6 +589,49 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn bookmarks_link_to_same_page_sections_and_fall_back_to_source_page() {
+        let mut blocks = vec![
+            Block::Heading {
+                level: 1,
+                id: "first".to_owned(),
+                text: "First chapter".to_owned(),
+            },
+            Block::Heading {
+                level: 2,
+                id: "details".to_owned(),
+                text: "1.1 Details".to_owned(),
+            },
+            Block::Paragraph {
+                html: "Unlabelled section.".to_owned(),
+            },
+        ];
+        let bookmark = |page, level, title: &str| TocType {
+            level,
+            title: title.to_owned(),
+            page,
+        };
+        let entries = bookmark_navigation(
+            &[
+                bookmark(10, 1, "1 First chapter"),
+                bookmark(10, 2, "1.1 Details for the chapter"),
+                bookmark(12, 2, "1.2 Unlabelled section"),
+                bookmark(14, 2, "Outside the selected range"),
+            ],
+            &mut blocks,
+            &[(10, 0), (10, 1)],
+            &HashMap::from([(10, 0), (12, 2)]),
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.level, entry.id.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "first"), (2, "details"), (2, "source-page-12")]
+        );
+        assert!(matches!(blocks[2], Block::PageAnchor { page: 12 }));
+    }
 
     #[test]
     fn selects_only_a_unique_numbered_caption_near_the_picture() {
