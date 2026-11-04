@@ -199,7 +199,12 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
 
     content.push_str("</body></html>\n");
     fingerprint.update(content.as_bytes());
-    fingerprint.update(book.author.as_deref().unwrap_or_default().as_bytes());
+    for (index, author) in book.authors.iter().enumerate() {
+        if index > 0 {
+            fingerprint.update([0]);
+        }
+        fingerprint.update(author.as_bytes());
+    }
     zip.start_file(format!("EPUB/{CONTENT}"), deflated)?;
     zip.write_all(content.as_bytes())?;
 
@@ -316,9 +321,29 @@ fn nav_list(
 fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> String {
     let title = escape(&book.title);
     let language = escape(&book.language);
-    let author = book.author.as_ref().map_or_else(String::new, |author| {
-        format!("<dc:creator>{}</dc:creator>", escape(author))
-    });
+    let mut metadata = String::new();
+    for author in &book.authors {
+        writeln!(metadata, "  <dc:creator>{}</dc:creator>", escape(author)).unwrap();
+    }
+    if let Some(year) = book.year {
+        writeln!(metadata, "  <dc:date>{year:04}</dc:date>").unwrap();
+    }
+    if let Some(publisher) = &book.publisher {
+        writeln!(
+            metadata,
+            "  <dc:publisher>{}</dc:publisher>",
+            escape(publisher)
+        )
+        .unwrap();
+    }
+    if let Some(description) = &book.description {
+        writeln!(
+            metadata,
+            "  <dc:description>{}</dc:description>",
+            escape(description)
+        )
+        .unwrap();
+    }
     let modified = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let properties = if has_mathml {
         r#" properties="mathml""#
@@ -337,8 +362,7 @@ fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> Str
   <dc:identifier id="publication-id">{id}</dc:identifier>
   <dc:title>{title}</dc:title>
   <dc:language>{language}</dc:language>
-  {author}
-  <meta property="dcterms:modified">{modified}</meta>
+{metadata}  <meta property="dcterms:modified">{modified}</meta>
 </metadata>
 <manifest>
   <item id="content" href="{CONTENT}" media-type="application/xhtml+xml"{properties}/>
@@ -386,4 +410,59 @@ fn escape(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use lopdf::{Document, Object, dictionary};
+    use serde_json::json;
+
+    use super::*;
+    use crate::{MetadataOverrides, book};
+
+    #[test]
+    fn package_metadata_uses_overrides_and_retains_the_source_language() {
+        let mut pdf = Document::new();
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Lang" => Object::string_literal("fr"),
+        });
+        pdf.trailer.set("Root", catalog);
+        pdf.trailer.set(
+            "Info",
+            dictionary! {
+                "Title" => Object::string_literal("Original title"),
+                "Author" => Object::string_literal("Original author"),
+            },
+        );
+        let book = book::normalize(
+            &json!({}),
+            &pdf,
+            Path::new("source.pdf"),
+            MetadataOverrides {
+                title: Some("Notes de géométrie <révisées>".into()),
+                authors: vec!["A & B".into(), "C. Author".into()],
+                year: Some(2015),
+                publisher: Some("Press & Co.".into()),
+                description: Some("An introduction to <math>.".into()),
+                ..MetadataOverrides::default()
+            },
+        );
+        let xml = package(&book, "test", "", false);
+        let opf = roxmltree::Document::parse(&xml).unwrap();
+        let values = |name| {
+            opf.descendants()
+                .filter(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", name)))
+                .filter_map(|node| node.text())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values("title"), ["Notes de géométrie <révisées>"]);
+        assert_eq!(values("creator"), ["A & B", "C. Author"]);
+        assert_eq!(values("date"), ["2015"]);
+        assert_eq!(values("publisher"), ["Press & Co."]);
+        assert_eq!(values("description"), ["An introduction to <math>."]);
+        assert_eq!(values("language"), ["fr"]);
+    }
 }

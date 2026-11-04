@@ -15,6 +15,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use lopdf::{Document, Object, decode_text_string};
 use serde_json::Value;
 
+use crate::MetadataOverrides;
+
 pub(crate) use math::{SourceCrops, locate_placeholders};
 use reflow::clean_text;
 pub(crate) use structure::TableCell;
@@ -23,8 +25,11 @@ pub(crate) use symbols::repair_symbols;
 pub(crate) struct Book {
     pub title: String,
     pub cover: Option<Vec<u8>>,
-    pub author: Option<String>,
+    pub authors: Vec<String>,
     pub language: String,
+    pub year: Option<u16>,
+    pub publisher: Option<String>,
+    pub description: Option<String>,
     pub blocks: Vec<Block>,
     pub navigation: Vec<NavEntry>,
     pub warnings: Vec<String>,
@@ -108,13 +113,24 @@ pub(crate) fn recover_source_regions(doc: &mut Value, pdf: &Document, input: &Pa
     }
 }
 
-pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
+pub fn is_language_tag(value: &str) -> bool {
+    value.split('-').all(|subtag| {
+        !subtag.is_empty() && subtag.len() <= 8 && subtag.bytes().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+pub(crate) fn normalize(
+    doc: &Value,
+    pdf: &Document,
+    input: &Path,
+    overrides: MetadataOverrides,
+) -> Book {
     let info = pdf
         .trailer
         .get(b"Info")
         .ok()
         .and_then(|obj| resolve(pdf, obj).as_dict().ok());
-    let title = info
+    let source_title = info
         .and_then(|info| metadata(pdf, info.get(b"Title").ok()))
         .or_else(|| {
             input
@@ -124,25 +140,31 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Untitled".to_owned());
-    let author = info.and_then(|info| metadata(pdf, info.get(b"Author").ok()));
-    let language = pdf
-        .catalog()
-        .ok()
-        .and_then(|catalog| metadata(pdf, catalog.get(b"Lang").ok()))
-        .filter(|lang| {
-            lang.split('-').all(|subtag| {
-                !subtag.is_empty()
-                    && subtag.len() <= 8
-                    && subtag.bytes().all(|c| c.is_ascii_alphanumeric())
-            })
+    let authors = if overrides.authors.is_empty() {
+        info.and_then(|info| metadata(pdf, info.get(b"Author").ok()))
+            .into_iter()
+            .collect()
+    } else {
+        overrides.authors
+    };
+    let language = overrides
+        .language
+        .or_else(|| {
+            pdf.catalog()
+                .ok()
+                .and_then(|catalog| metadata(pdf, catalog.get(b"Lang").ok()))
+                .filter(|lang| is_language_tag(lang))
         })
         .unwrap_or_else(|| "und".to_owned());
 
     let mut book = Book {
-        cover: cover::render(doc, pdf, input, &title),
-        title,
-        author,
+        cover: cover::render(doc, pdf, input, &source_title),
+        title: overrides.title.unwrap_or(source_title),
+        authors,
         language,
+        year: overrides.year,
+        publisher: overrides.publisher,
+        description: overrides.description,
         blocks: Vec::new(),
         navigation: Vec::new(),
         warnings: Vec::new(),
@@ -548,7 +570,12 @@ mod tests {
             ]
         });
 
-        let book = normalize(&doc, &Document::new(), Path::new("source.pdf"));
+        let book = normalize(
+            &doc,
+            &Document::new(),
+            Path::new("source.pdf"),
+            MetadataOverrides::default(),
+        );
         let [Block::Paragraph { html }, Block::Note { id, html: note }] = book.blocks.as_slice()
         else {
             panic!("expected one continued paragraph followed by the note");

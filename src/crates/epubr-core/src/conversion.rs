@@ -16,6 +16,25 @@ pub struct ConversionOptions {
     pub pages: Option<(usize, usize)>,
 }
 
+/// Metadata supplied by the caller for the generated EPUB.
+#[derive(Debug, Default)]
+pub struct MetadataOverrides {
+    pub title: Option<String>,
+    /// Replaces the PDF author when at least one author is supplied.
+    pub authors: Vec<String>,
+    /// Publication year, from 1 to 9999.
+    pub year: Option<u16>,
+    pub language: Option<String>,
+    pub publisher: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Default)]
+pub struct ConversionSettings {
+    pub options: ConversionOptions,
+    pub metadata: MetadataOverrides,
+}
+
 #[derive(Debug, Default)]
 pub struct CancellationToken(AtomicBool);
 
@@ -78,7 +97,10 @@ pub fn convert(
     convert_inner(
         input,
         output,
-        options,
+        ConversionSettings {
+            options,
+            ..ConversionSettings::default()
+        },
         None,
         None,
         cancellation,
@@ -98,7 +120,10 @@ pub fn convert_with_models(
     convert_inner(
         input,
         output,
-        options,
+        ConversionSettings {
+            options,
+            ..ConversionSettings::default()
+        },
         Some(models),
         None,
         cancellation,
@@ -140,10 +165,34 @@ pub fn convert_with_worker_setup(
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {
+    convert_with_worker_metadata(
+        input,
+        output,
+        ConversionSettings {
+            options,
+            ..ConversionSettings::default()
+        },
+        models,
+        worker,
+        cancellation,
+        on_progress,
+    )
+}
+
+#[doc(hidden)]
+pub fn convert_with_worker_metadata(
+    input: &Path,
+    output: &Path,
+    settings: ConversionSettings,
+    models: &ModelConfig,
+    worker: &ExtractionWorker<'_>,
+    cancellation: &CancellationToken,
+    on_progress: impl Fn(Progress) + Sync,
+) -> Result<ConversionReport, ConversionError> {
     convert_inner(
         input,
         output,
-        options,
+        settings,
         Some(models),
         Some(worker),
         cancellation,
@@ -154,12 +203,13 @@ pub fn convert_with_worker_setup(
 fn convert_inner(
     input: &Path,
     output: &Path,
-    options: ConversionOptions,
+    settings: ConversionSettings,
     models: Option<&ModelConfig>,
     worker: Option<&ExtractionWorker<'_>>,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {
+    let ConversionSettings { options, metadata } = settings;
     cancellation.check()?;
     match output.symlink_metadata() {
         Ok(_) => return Err(ConversionError::DestinationExists),
@@ -201,7 +251,7 @@ fn convert_inner(
         &on_progress,
     )?;
     cancellation.check()?;
-    let book = crate::book::normalize(&document, &pdf, input);
+    let book = crate::book::normalize(&document, &pdf, input, metadata);
     if book.cover.is_none() && book.blocks.is_empty() {
         return Err(ConversionError::NoContent);
     }

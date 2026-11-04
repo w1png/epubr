@@ -7,10 +7,14 @@ mod extraction;
 mod models;
 
 #[doc(hidden)]
-pub use conversion::convert_with_worker_setup;
+pub use book::is_language_tag;
 pub use conversion::{
     CancellationToken, ConversionError, ConversionOptions, ConversionReport, convert,
     convert_with_models, convert_with_worker,
+};
+#[doc(hidden)]
+pub use conversion::{
+    ConversionSettings, MetadataOverrides, convert_with_worker_metadata, convert_with_worker_setup,
 };
 #[doc(hidden)]
 pub use extraction::{EXTRACTION_WORKER_FLAG, ExtractionWorker, run_extraction_worker};

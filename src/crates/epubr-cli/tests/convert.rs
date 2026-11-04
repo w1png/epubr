@@ -114,3 +114,59 @@ fn debug_conflicts_with_quiet_before_and_after_the_subcommand() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
     }
 }
+
+#[test]
+fn convert_accepts_book_metadata_with_multiple_authors() {
+    let root = tempfile::tempdir().unwrap();
+    let output = epubr()
+        .arg("convert")
+        .arg(root.path().join("missing.pdf"))
+        .arg("-o")
+        .arg(root.path().join("book.epub"))
+        .args([
+            "--title",
+            "Algebra & Logic",
+            "--author",
+            "A. Writer",
+            "--author",
+            "B. Writer",
+            "--year",
+            "2024",
+            "--language",
+            "sr-Latn-RS",
+            "--publisher",
+            "Example Press",
+            "--description",
+            "An introduction to formal reasoning.",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("input is not a readable PDF"), "{stderr}");
+}
+
+#[test]
+fn convert_rejects_invalid_book_metadata_before_opening_input() {
+    for (flag, value) in [
+        ("--title", " \t "),
+        ("--author", " \t "),
+        ("--publisher", " \t "),
+        ("--description", " \t "),
+        ("--year", "0"),
+        ("--year", "10000"),
+        ("--year", "unknown"),
+        ("--language", "en_US"),
+        ("--language", "123"),
+    ] {
+        let output = epubr()
+            .args(["convert", "missing.pdf", "-o", "output.epub", flag, value])
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{flag} {value:?}: {stderr}");
+        assert!(stderr.contains(flag), "{stderr}");
+    }
+}

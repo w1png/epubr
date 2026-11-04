@@ -29,6 +29,17 @@ formula-heavy range and compare the EPUB with the PDF.
 epubr convert raw/hard.pdf -o hard-technical-preview.epub --model technical --mode auto --pages 172-176
 ```
 
+Set book metadata when converting a PDF. Repeat `--author` to list multiple
+authors in order. Omitted title, author, and language fields use the
+converter's existing PDF metadata and fallbacks.
+
+```sh
+epubr convert input.pdf -o output.epub \
+  --title "Applied Cryptography Notes" --author "Alex Rivera" --author "Sam Chen" \
+  --year 2024 --language en --publisher "Example Press" \
+  --description "A reference for engineers."
+```
+
 - `--mode auto` uses OCR as needed, `--mode text` uses the PDF's text layer,
   and `--mode scan` forces OCR. Use `--pages 24-30` for an inclusive range.
 - `--model standard` selects layout, tables, and multilingual OCR (about 295 MiB).
