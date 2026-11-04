@@ -48,8 +48,7 @@ pub(super) fn placeholder(text: &str) -> bool {
 }
 
 /// Docling omits provenance when its decoder is disabled or fails. Recover
-/// the gap between the neighboring regions only when both are on the same
-/// page and bound a single missing equation.
+/// the source ink between neighboring regions around a single missing equation.
 pub(crate) fn locate_placeholders(doc: &mut Value, input: &Path) {
     let items = ordered_items(doc);
     let is_placeholder = |item: &Value| item["text"].as_str().is_some_and(placeholder);
@@ -70,23 +69,35 @@ pub(crate) fn locate_placeholders(doc: &mut Value, input: &Path) {
         let located = |candidate: &&Value| page_no(candidate) > 0 || is_placeholder(candidate);
         let before = items[..index].iter().rev().copied().find(located);
         let after = items[index + 1..].iter().copied().find(located);
-        let provenance = (|| {
+        let located_region = (|| {
             let (before, after) = (before?, after?);
             let page = page_no(before);
-            if page == 0 || page != page_no(after) {
+            let next_page = page_no(after);
+            if page == 0 || next_page == 0 {
                 return None;
             }
-            let (before, after) = (Bounds::from_item(before)?, Bounds::from_item(after)?);
+            let (above, below) = (Bounds::from_item(before)?, Bounds::from_item(after)?);
+            // A display equation can be the last item before the page turns.
+            // Only search below its lead-in, on that same source page.
+            let at_page_end = page.checked_add(1) == Some(next_page);
+            if page != next_page && !at_page_end {
+                return None;
+            }
             let mut bounds = Bounds {
-                left: before.left.min(after.left),
-                right: before.right.max(after.right),
-                top: before.bottom,
-                bottom: after.top,
+                left: above.left.min(below.left),
+                right: above.right.max(below.right),
+                top: above.bottom,
+                bottom: if at_page_end {
+                    (above.bottom - 72.0).max(0.0)
+                } else {
+                    below.top
+                },
             };
             if !(3.0..=96.0).contains(&(bounds.top - bounds.bottom)) {
                 return None;
             }
             let page_index = usize::try_from(page).ok()?.checked_sub(1)?;
+            let mut source = String::new();
             if let Some(parser) = parser
                 .get_or_insert_with(|| PageTextParser::open(&std::fs::read(input).ok()?))
                 .as_mut()
@@ -112,23 +123,28 @@ pub(crate) fn locate_placeholders(doc: &mut Value, input: &Path) {
                         top: height - f64::from(cell.t),
                         bottom: height - f64::from(cell.b),
                     };
-                    // Docling can merge a page-opening paragraph into the
-                    // previous page and retain only the earlier provenance.
-                    // Prefer a unique equation in the gap so the crop still
-                    // excludes that continuation paragraph.
-                    let mut equations = parsed
+                    // Docling can attach the next page's opening prose to the
+                    // preceding page. Exclude lines already present in that
+                    // prose, but retain every row and script in the display.
+                    let previous_text = items[..index]
+                        .iter()
+                        .rev()
+                        .find(|item| {
+                            matches!(super::label(item), "text" | "paragraph")
+                                && !is_placeholder(item)
+                        })
+                        .and_then(|item| item["text"].as_str())
+                        .map(without_whitespace)
+                        .unwrap_or_default();
+                    if let Some(ink) = parsed
                         .cells
                         .iter()
                         .filter(inside)
-                        .filter(|cell| standalone_equation(&cell.text));
-                    if let Some(equation) = equations.next()
-                        && equations.next().is_none()
-                    {
-                        bounds = to_bounds(equation);
-                    } else if let Some(ink) = parsed
-                        .word_cells
-                        .iter()
-                        .filter(inside)
+                        .filter(|cell| {
+                            let line = without_whitespace(&cell.text);
+                            line.len() < 12 || !previous_text.contains(&line)
+                        })
+                        .inspect(|cell| source.push_str(&cell.text))
                         .map(to_bounds)
                         .reduce(|a, b| Bounds {
                             left: a.left.min(b.left),
@@ -141,28 +157,81 @@ pub(crate) fn locate_placeholders(doc: &mut Value, input: &Path) {
                     }
                 }
             }
-            Some(json!([{
-                "page_no": page,
-                "bbox": {
-                    "coord_origin": "BOTTOMLEFT",
-                    "l": bounds.left, "r": bounds.right,
-                    "t": bounds.top, "b": bounds.bottom
-                }
-            }]))
+            if at_page_end && source.is_empty() {
+                return None;
+            }
+            Some((
+                json!([{
+                    "page_no": page,
+                    "bbox": {
+                        "coord_origin": "BOTTOMLEFT",
+                        "l": bounds.left, "r": bounds.right,
+                        "t": bounds.top, "b": bounds.bottom
+                    }
+                }]),
+                source,
+            ))
         })();
-        updates.push((pointer.to_owned(), provenance));
+        updates.push((pointer.to_owned(), located_region));
     }
-    for (pointer, provenance) in updates {
+    for (pointer, located_region) in updates {
         if let Some(item) = doc.pointer_mut(&pointer) {
             item["label"] = json!("formula");
             item["text"] = json!("");
             item["orig"] = json!("");
             item["epubr_formula_undecoded"] = json!(true);
-            if let Some(provenance) = provenance {
+            if let Some((provenance, source)) = located_region {
                 item["prov"] = provenance;
+                item["epubr_formula_source_ink"] = json!(source);
             }
         }
     }
+}
+
+fn without_whitespace(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+/// Compare decoded tokens with source ink where a text layer is available.
+/// This catches a partial or hallucinated decode before publishing MathML.
+pub(super) fn consistent_with_source(mathml: &str, source: &str) -> bool {
+    let tokens: String = mathml
+        .split('<')
+        .filter_map(|tag| tag.split_once('>').map(|(_, token)| token))
+        .collect();
+    let tokens = tokens
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    let signature = |text: &str| -> BTreeMap<char, usize> {
+        let mut counts = BTreeMap::new();
+        for ch in text.chars() {
+            let ch = match ch {
+                '`' => 'ℓ',
+                '⋯' | '…' => '·',
+                other => comparable(other),
+            };
+            if ch.is_alphanumeric() || "+-=≤≥≈≠∧∨¬∑".contains(ch) {
+                *counts.entry(ch).or_default() += 1;
+            }
+        }
+        counts
+    };
+    let expected = signature(source);
+    if expected.is_empty() {
+        return true;
+    }
+    let actual = signature(&tokens);
+    let missing: usize = expected
+        .iter()
+        .map(|(ch, count)| count.saturating_sub(actual.get(ch).copied().unwrap_or_default()))
+        .sum();
+    let unexpected: usize = actual
+        .iter()
+        .map(|(ch, count)| count.saturating_sub(expected.get(ch).copied().unwrap_or_default()))
+        .sum();
+    let total: usize = expected.values().sum();
+    missing + unexpected <= (total / 20).min(2)
 }
 
 impl Bounds {
@@ -523,16 +592,7 @@ impl<'a> SourceCrops<'a> {
         }
 
         let crop = self.raster(formula, 0.0)?;
-        let mut bytes = Vec::new();
-        PngEncoder::new(&mut bytes)
-            .write_image(
-                crop.as_raw(),
-                crop.width(),
-                crop.height(),
-                ColorType::Rgb8.into(),
-            )
-            .ok()?;
-        Some(("image/png".to_owned(), bytes))
+        Some(("image/png".to_owned(), encode_png(&crop)?))
     }
 
     /// Rasterize the source region, expanding each edge by the specified
@@ -587,6 +647,19 @@ impl<'a> SourceCrops<'a> {
     }
 }
 
+pub(super) fn encode_png(image: &RgbImage) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ColorType::Rgb8.into(),
+        )
+        .ok()?;
+    Some(bytes)
+}
+
 fn picture_crop(doc: &Value, formula: &Value) -> Option<(String, Vec<u8>)> {
     let target = Bounds::from_item(formula)?;
     let area = (target.right - target.left) * (target.top - target.bottom);
@@ -617,6 +690,24 @@ pub(super) fn presentation(raw: &str) -> Option<String> {
     (!body.is_empty()).then(|| format!(
         "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\"><mrow>{body}</mrow></math>"
     ))
+}
+
+/// The decoder can insert whitespace between the digits of a number.
+pub(super) fn compact_decoded_numbers(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for part in text.split_whitespace() {
+        let follows_number = result.ends_with(|ch: char| ch.is_ascii_digit())
+            && part.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.');
+        let follows_decimal = result
+            .strip_suffix('.')
+            .is_some_and(|prefix| prefix.ends_with(|ch: char| ch.is_ascii_digit()))
+            && part.starts_with(|ch: char| ch.is_ascii_digit());
+        if !result.is_empty() && !follows_number && !follows_decimal {
+            result.push(' ');
+        }
+        result.push_str(part);
+    }
+    result
 }
 
 pub(super) fn standalone_equation(text: &str) -> bool {
@@ -730,6 +821,9 @@ fn atom(chars: &mut Peekable<Chars<'_>>, depth: usize) -> Option<String> {
                     Some(format!("<mtext>{}</mtext>", escape_xml(&text)))
                 }
                 "left" | "right" => argument(chars, depth),
+                "Pr" => Some("<mi mathvariant=\"normal\">Pr</mi>".to_owned()),
+                "quad" => Some("<mspace width=\"1em\"/>".to_owned()),
+                "qquad" => Some("<mspace width=\"2em\"/>".to_owned()),
                 "" => match chars.next()? {
                     ' ' | ',' | ';' | ':' => Some("<mspace width=\"0.25em\"/>".to_owned()),
                     delimiter @ ('{' | '}' | '|') => Some(format!("<mo>{delimiter}</mo>")),
@@ -764,6 +858,7 @@ fn atom(chars: &mut Peekable<Chars<'_>>, depth: usize) -> Option<String> {
                         "prod" => "∏",
                         "int" => "∫",
                         "bmod" | "mod" => "mod",
+                        "colon" => ":",
                         "ell" => return Some("<mi>ℓ</mi>".to_owned()),
                         "alpha" => return Some("<mi>α</mi>".to_owned()),
                         "beta" => return Some("<mi>β</mi>".to_owned()),
@@ -786,8 +881,21 @@ fn atom(chars: &mut Peekable<Chars<'_>>, depth: usize) -> Option<String> {
         }
         character if character.is_ascii_digit() => {
             let mut digits = String::from(character);
-            while chars.peek().is_some_and(char::is_ascii_digit) {
-                digits.push(chars.next()?);
+            loop {
+                let mut rest = chars.clone();
+                if rest.peek() == Some(&'.') {
+                    rest.next();
+                    if !digits.contains('.') && rest.peek().is_some_and(char::is_ascii_digit) {
+                        digits.push('.');
+                    } else {
+                        break;
+                    }
+                }
+                if !rest.peek().is_some_and(char::is_ascii_digit) {
+                    break;
+                }
+                digits.push(rest.next()?);
+                *chars = rest;
             }
             Some(format!("<mn>{digits}</mn>"))
         }
@@ -805,6 +913,27 @@ fn is_math_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_shift_cipher_and_probability_notation_from_the_decoder() {
+        let decoded = compact_decoded_numbers(
+            r"\text {Enc} _ { k } ( m _ { 1 } \cdots m _ { \ell } ) = c _ { 1 } \cdots c _ { \ell } , \quad \text {where } c _ { i } = [ ( m _ { i } + k ) \bmod 2 6 ] .",
+        );
+        let mathml = presentation(&decoded).expect("shift cipher MathML");
+        assert!(mathml.contains("<mn>26</mn>"));
+        assert!(mathml.contains("<msub>"));
+        assert!(consistent_with_source(
+            &mathml,
+            "Enck(m1 · · · m`) = c1 · · · c`, where ci = [(mi + k) mod 26]."
+        ));
+
+        let probability = presentation(&compact_decoded_numbers(r"\Pr[M=a]=0 . 7")).unwrap();
+        assert!(probability.contains("<mn>0.7</mn>"));
+        assert!(!consistent_with_source(
+            &probability,
+            "Pr[M=a]=0.7 and Pr[M=z]=0.3"
+        ));
+    }
 
     #[test]
     fn locates_undecoded_formula_between_source_regions() {

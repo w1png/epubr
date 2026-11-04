@@ -18,6 +18,9 @@ const CONTAINER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 const STYLES: &str = r#"body { line-height: 1.4; }
 figure { margin: 1em 0; }
 img { max-width: 100%; height: auto; }
+body.cover { margin: 0; text-align: center; }
+body.cover img { max-height: 100vh; object-fit: contain; }
+.formula-image { text-align: center; }
 figcaption, aside { font-size: 0.9em; }
 pre { font-family: monospace; font-size: 0.88em; white-space: pre-wrap; overflow-wrap: break-word; }
 table { border-collapse: collapse; max-width: 100%; }
@@ -53,6 +56,25 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     let mut has_mathml = false;
     let mut fingerprint = Sha256::new();
 
+    if let Some(cover) = &book.cover {
+        zip.start_file("EPUB/cover.png", stored)?;
+        zip.write_all(cover)?;
+        fingerprint.update(Sha256::digest(cover));
+        let xhtml = xhtml_start(&book.title, &book.language)
+            .replace("<body>", "<body class=\"cover\" epub:type=\"cover\">");
+        zip.start_file("EPUB/cover.xhtml", deflated)?;
+        zip.write_all(
+            format!(
+                "{xhtml}<img src=\"cover.png\" alt=\"Cover of {}\"/></body></html>\n",
+                escape(&book.title)
+            )
+            .as_bytes(),
+        )?;
+        image_manifest.push_str(
+            "<item id=\"cover-page\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n\
+             <item id=\"cover-image\" href=\"cover.png\" media-type=\"image/png\" properties=\"cover-image\"/>\n",
+        );
+    }
     for block in &book.blocks {
         match block {
             Block::Heading { level, id, text } => {
@@ -99,10 +121,9 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 writeln!(content, "<pre><code>{}</code></pre></figure>", escape(text)).unwrap();
             }
             Block::Figure {
-                media_type,
-                data,
-                caption,
-            } => {
+                media_type, data, ..
+            }
+            | Block::FormulaImage { media_type, data } => {
                 let extension = image_extension(media_type)?;
                 image_count += 1;
                 let href = format!("images/image-{image_count}.{extension}");
@@ -114,6 +135,10 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                     "<item id=\"image-{image_count}\" href=\"{href}\" media-type=\"{media_type}\"/>"
                 )
                 .unwrap();
+                let Block::Figure { caption, .. } = block else {
+                    writeln!(content, "<div class=\"formula-image\"><img src=\"{href}\" alt=\"Equation from source PDF\"/></div>").unwrap();
+                    continue;
+                };
                 let caption = escape(caption);
                 let alt = if caption.is_empty() {
                     "Figure"
@@ -297,6 +322,11 @@ fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> Str
     } else {
         ""
     };
+    let cover = if book.cover.is_some() {
+        r#"<itemref idref="cover-page"/>"#
+    } else {
+        ""
+    };
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="publication-id">
@@ -313,7 +343,7 @@ fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> Str
   <item id="stylesheet" href="book.css" media-type="text/css"/>
   {image_manifest}
 </manifest>
-<spine><itemref idref="content"/></spine>
+<spine>{cover}<itemref idref="content"/></spine>
 </package>
 "#
     )

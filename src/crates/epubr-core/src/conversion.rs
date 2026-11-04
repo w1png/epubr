@@ -178,7 +178,7 @@ fn convert_inner(
     )?;
     cancellation.check()?;
     let book = crate::book::normalize(&document, &pdf, input);
-    if book.blocks.is_empty() {
+    if book.cover.is_none() && book.blocks.is_empty() {
         return Err(ConversionError::NoContent);
     }
 

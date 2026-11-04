@@ -97,6 +97,7 @@ pub(super) fn enrich(
                 } else {
                     item["text"] = Value::String(text);
                     item["epubr_formula_undecoded"] = Value::Bool(false);
+                    item["epubr_enriched"] = Value::Bool(true);
                 }
             }
             Ok(Some(Response::Unavailable)) => {

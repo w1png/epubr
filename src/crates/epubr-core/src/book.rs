@@ -1,4 +1,5 @@
 mod code;
+mod cover;
 mod lists;
 mod math;
 mod notes;
@@ -21,6 +22,7 @@ pub(crate) use symbols::repair_symbols;
 
 pub(crate) struct Book {
     pub title: String,
+    pub cover: Option<Vec<u8>>,
     pub author: Option<String>,
     pub language: String,
     pub blocks: Vec<Block>,
@@ -67,6 +69,10 @@ pub(crate) enum Block {
     },
     Formula {
         mathml: String,
+    },
+    FormulaImage {
+        media_type: String,
+        data: Vec<u8>,
     },
     Code {
         text: String,
@@ -130,6 +136,7 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
         .unwrap_or_else(|| "und".to_owned());
 
     let mut book = Book {
+        cover: cover::render(doc, pdf, input, &title),
         title,
         author,
         language,
@@ -138,6 +145,9 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
         warnings: Vec::new(),
     };
     let mut items = ordered_items(doc);
+    if book.cover.is_some() {
+        items.retain(|item| page_no(item) != 1);
+    }
     order::repair(&mut items);
     let reflow = reflow::Reflow::new(doc);
     let mut texts: Vec<_> = items.iter().map(|item| reflow.text(item)).collect();
@@ -231,13 +241,20 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
                 };
                 let raw = if item["epubr_source_text"] == true {
                     raw
+                } else if item["epubr_enriched"] == true {
+                    math::compact_decoded_numbers(&raw)
                 } else {
                     geometry
                         .recover_formula(item)
                         .or_else(|| geometry.recover_overbar(item, &raw))
                         .unwrap_or(raw)
                 };
-                if let Some(mathml) = math::presentation(&raw) {
+                if let Some(mathml) = math::presentation(&raw)
+                    && (item["epubr_enriched"] != true
+                        || item["epubr_formula_source_ink"]
+                            .as_str()
+                            .is_none_or(|source| math::consistent_with_source(&mathml, source)))
+                {
                     book.blocks.push(Block::Formula { mathml });
                 } else {
                     book.warnings.push(format!(
@@ -245,13 +262,12 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
                         page_no(item)
                     ));
                     if let Some((media_type, data)) = crops.crop(doc, item) {
-                        book.blocks.push(Block::Figure {
-                            media_type,
-                            data,
-                            caption: raw,
-                        });
+                        book.blocks.push(Block::FormulaImage { media_type, data });
                     } else {
-                        paragraph(&mut book.blocks, &raw);
+                        book.warnings.push(format!(
+                            "Page {}: no source crop is available for the formula",
+                            page_no(item)
+                        ));
                     }
                 }
             }
