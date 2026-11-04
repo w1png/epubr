@@ -7,13 +7,26 @@ The current milestone is the linked Docling extraction check.
 - `epubr-cli` contains the command-line entry point. Its current executable,
   `epubr-docling-probe`, emits the extracted document as JSON.
 
-To run the extraction check, pass a directory containing the pinned Docling
-`.models/` assets. The probe reports extraction events on stderr.
+The probe downloads and verifies pinned Docling assets on first use, then
+reuses the verified cache offline. It reports download bytes and extraction
+progress on stderr and writes JSON to stdout.
 
 ```sh
 cargo run --release --locked -p epubr-cli -- raw/input.pdf \
-  --models /path/to/docling-assets --pages 24-30 --mode text > extraction.json
+  --model standard --pages 24-30 --mode text > extraction.json
 ```
+
+- `--model standard` selects layout, tables, and multilingual OCR (about 295 MiB).
+  `--model technical` adds formula enrichment (about 1.01 GiB total) and is the
+  default. Both profiles share cached assets.
+- `--models DIR` uses a preinstalled directory containing the pinned
+  `.models/` assets. Epubr verifies this directory and reports missing or
+  invalid assets. With no override, it uses the OS user cache (on Linux,
+  `$XDG_CACHE_HOME/epubr` or `~/.cache/epubr`, and on macOS,
+  `~/Library/Caches/epubr`).
+- `EPUBR_MODEL` and `EPUBR_MODEL_DIR` set defaults for the corresponding flags.
+  A future web entry point can read the same settings with
+  `epubr_core::ModelConfig::from_env()`.
 
 See the [technical-book acceptance cases](docs/acceptance.md) for the pages
 used to check extraction and reader compatibility.

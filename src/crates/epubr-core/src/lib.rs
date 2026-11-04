@@ -1,10 +1,12 @@
 //! PDF extraction and conversion interfaces for Epubr.
 
 mod conversion;
+mod models;
 
 pub use conversion::{
     CancellationToken, ConversionError, ConversionOptions, ConversionReport, convert,
 };
+pub use models::{ModelConfig, ModelError, ModelProfile, PreparedModels};
 
 use std::fmt;
 use std::path::Path;
@@ -33,6 +35,11 @@ pub struct ExtractionOptions {
 /// Observed progress from the extractor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Progress {
+    ModelDownload {
+        asset: &'static str,
+        downloaded: u64,
+        total: Option<u64>,
+    },
     Started,
     Page {
         completed: usize,
@@ -87,6 +94,17 @@ pub fn extract(
     options: ExtractionOptions,
     on_progress: impl Fn(Progress) + Send + Sync + 'static,
 ) -> Result<Extracted, ExtractionError> {
+    extract_profile(input, options, ModelProfile::default(), on_progress)
+}
+
+/// Run extraction in a process configured by
+/// [`PreparedModels::configure_command`].
+pub fn extract_profile(
+    input: &Path,
+    options: ExtractionOptions,
+    profile: ModelProfile,
+    on_progress: impl Fn(Progress) + Send + Sync + 'static,
+) -> Result<Extracted, ExtractionError> {
     if let Some((first, last)) = options.pages
         && (first == 0 || first > last)
     {
@@ -106,7 +124,7 @@ pub fn extract(
         .force_full_page_ocr(options.mode == OcrMode::Scan)
         .heading_hierarchy(true)
         .keep_picture_images(true)
-        .do_formula_enrichment(true)
+        .do_formula_enrichment(profile == ModelProfile::Technical)
         .progress_callback(Arc::new(move |event| match event.kind {
             ProgressKind::DocumentStarted => on_progress(Progress::Started),
             ProgressKind::PageCompleted {
