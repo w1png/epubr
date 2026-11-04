@@ -78,6 +78,19 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
             Block::Paragraph { html } => {
                 writeln!(content, "<p>{html}</p>").unwrap();
             }
+            Block::List { ordered, items } => {
+                let tag = if *ordered { "ol" } else { "ul" };
+                writeln!(content, "<{tag}>").unwrap();
+                for item in items {
+                    has_mathml |= item.has_mathml;
+                    if let Some(number) = item.number.filter(|_| *ordered) {
+                        writeln!(content, "<li value=\"{number}\">{}</li>", item.html).unwrap();
+                    } else {
+                        writeln!(content, "<li>{}</li>", item.html).unwrap();
+                    }
+                }
+                writeln!(content, "</{tag}>").unwrap();
+            }
             Block::Code { text, caption } => {
                 content.push_str("<figure>\n");
                 if !caption.is_empty() {

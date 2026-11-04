@@ -1,4 +1,5 @@
 mod code;
+mod lists;
 mod math;
 mod notes;
 mod order;
@@ -33,6 +34,12 @@ pub(crate) struct NavEntry {
     pub text: String,
 }
 
+pub(crate) struct ListItem {
+    pub html: String,
+    pub has_mathml: bool,
+    pub number: Option<u64>,
+}
+
 pub(crate) enum Block {
     Contents {
         title: String,
@@ -44,6 +51,10 @@ pub(crate) enum Block {
     },
     Paragraph {
         html: String,
+    },
+    List {
+        ordered: bool,
+        items: Vec<ListItem>,
     },
     Figure {
         media_type: String,
@@ -128,21 +139,24 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
     };
     let mut items = ordered_items(doc);
     order::repair(&mut items);
-    let notes = notes::link_notes(&items, &mut book.warnings);
+    let reflow = reflow::Reflow::new(doc);
+    let mut texts: Vec<_> = items.iter().map(|item| reflow.text(item)).collect();
+    let numbering = lists::recover_numbering(&items, &mut texts);
+    let notes = notes::link_notes(&items, &texts, &mut book.warnings);
     let contents = structure::printed_contents(&items);
     let figure_labels = structure::figure_labels(&items);
-    let reflow = reflow::Reflow::new(doc);
     let mut geometry = math::PageGeometry::new(pdf, input);
     let mut crops = math::SourceCrops::new(input);
     let mut source_code = code::SourceCode::new(input);
     let mut headings = Vec::new();
-    let mut previous_prose = None;
-    for (index, item) in items.iter().enumerate() {
+    let mut previous_prose: Option<(&Value, usize)> = None;
+    let mut list_run = None;
+    for (index, (item, text)) in items.iter().zip(texts).enumerate() {
         if matches!(label(item), "page_header" | "page_footer") {
             continue;
         }
         let previous = previous_prose.take();
-        let text = reflow.text(item);
+        let previous_list = list_run.take();
         if contents.position(index) {
             book.blocks.push(Block::Contents {
                 title: text.clone(),
@@ -207,6 +221,7 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
                     ));
                 }
                 book.blocks.push(Block::Note { id, html });
+                previous_prose = previous.filter(|(prose, _)| page_no(prose) == page_no(item));
             }
             "formula" => {
                 let raw = if math::placeholder(&text) || item["epubr_formula_undecoded"] == true {
@@ -269,31 +284,63 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
                     page_no(item)
                 ));
             }
-            _ if !text.is_empty() => {
-                if let Some(html) = notes.references.get(&index) {
-                    book.blocks.push(Block::Paragraph {
-                        html: html.to_owned(),
+            "list_item" if !text.is_empty() => {
+                let recovered_number = numbering.get(&index).copied();
+                let ordered = item["enumerated"] == true || recovered_number.is_some();
+                let number = recovered_number.or_else(|| {
+                    item["marker"]
+                        .as_str()?
+                        .trim()
+                        .strip_suffix('.')?
+                        .parse()
+                        .ok()
+                });
+                let group = (item["parent"]["$ref"].as_str(), ordered);
+                let reference = notes.references.get(&index);
+                let mathml = if reference.is_none() && math::standalone_equation(&text) {
+                    let raw = geometry.recover_overbar(item, &text);
+                    math::presentation(raw.as_deref().unwrap_or(&text))
+                } else {
+                    None
+                };
+                let entry = ListItem {
+                    has_mathml: mathml.is_some(),
+                    html: mathml
+                        .unwrap_or_else(|| prose_html(item, text, reference, &mut geometry)),
+                    number,
+                };
+                if previous_list == Some(group)
+                    && let Some(Block::List { items, .. }) = book.blocks.last_mut()
+                {
+                    items.push(entry);
+                } else {
+                    book.blocks.push(Block::List {
+                        ordered,
+                        items: vec![entry],
                     });
-                } else if math::standalone_equation(&text) {
+                }
+                list_run = Some(group);
+            }
+            _ if !text.is_empty() => {
+                let reference = notes.references.get(&index);
+                if reference.is_none() && math::standalone_equation(&text) {
                     let raw = geometry.recover_overbar(item, &text).unwrap_or(text);
                     if let Some(mathml) = math::presentation(&raw) {
                         book.blocks.push(Block::Formula { mathml });
                     } else {
                         paragraph(&mut book.blocks, &raw);
                     }
+                    continue;
+                }
+                let html = prose_html(item, text, reference, &mut geometry);
+                if let Some((previous_item, previous_block)) = previous
+                    && let Block::Paragraph { html: prior } = &mut book.blocks[previous_block]
+                    && reflow.join(doc, previous_item, item, prior, &html)
+                {
+                    previous_prose = Some((*item, previous_block));
                 } else {
-                    let text = geometry.recover_inline(item, &text).unwrap_or(text);
-                    let html = escape_xml(&text);
-                    let joined = match previous.zip(book.blocks.last_mut()) {
-                        Some((previous, Block::Paragraph { html: prior })) => {
-                            reflow.join(doc, previous, item, prior, &html)
-                        }
-                        _ => false,
-                    };
-                    if !joined {
-                        book.blocks.push(Block::Paragraph { html });
-                    }
-                    previous_prose = Some(*item);
+                    previous_prose = Some((*item, book.blocks.len()));
+                    book.blocks.push(Block::Paragraph { html });
                 }
             }
             _ => {}
@@ -304,6 +351,18 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
         book.navigation = outline_navigation(pdf, &book.blocks, &headings);
     }
     book
+}
+
+fn prose_html(
+    item: &Value,
+    text: String,
+    note_reference: Option<&String>,
+    geometry: &mut math::PageGeometry<'_>,
+) -> String {
+    if let Some(reference) = note_reference {
+        return reference.clone();
+    }
+    escape_xml(&geometry.recover_inline(item, &text).unwrap_or(text))
 }
 
 fn paragraph(blocks: &mut Vec<Block>, text: &str) {
@@ -439,4 +498,42 @@ fn escape_xml(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn joins_page_fragments_across_a_footnote_and_keeps_its_reference() {
+        let doc = json!({
+            "body": {"children": [
+                {"$ref": "#/texts/0"}, {"$ref": "#/texts/1"}, {"$ref": "#/texts/2"}
+            ]},
+            "pages": {
+                "1": {"size": {"width": 500, "height": 600}},
+                "2": {"size": {"width": 500, "height": 600}}
+            },
+            "texts": [
+                {"label":"text", "text":"The result [1] depends on", "prov":[
+                    {"page_no":1,"bbox":{"l":50,"r":450,"t":150,"b":78,"coord_origin":"BOTTOMLEFT"}}
+                ]},
+                {"label":"footnote", "text":"1 A source note.", "prov":[{"page_no":1}]},
+                {"label":"text", "text":"the chosen architecture.", "prov":[
+                    {"page_no":2,"bbox":{"l":50,"r":450,"t":540,"b":480,"coord_origin":"BOTTOMLEFT"}}
+                ]}
+            ]
+        });
+
+        let book = normalize(&doc, &Document::new(), Path::new("source.pdf"));
+        let [Block::Paragraph { html }, Block::Note { id, html: note }] = book.blocks.as_slice()
+        else {
+            panic!("expected one continued paragraph followed by the note");
+        };
+        assert!(html.ends_with("depends on the chosen architecture."));
+        assert!(html.contains(&format!("href=\"#{id}\"")));
+        assert!(note.contains("href=\"#noteref-2\""));
+    }
 }

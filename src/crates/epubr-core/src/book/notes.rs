@@ -3,14 +3,18 @@ use std::ops::Range;
 
 use serde_json::Value;
 
-use super::{escape_xml, item_text, label, page_no};
+use super::{escape_xml, label, page_no};
 
 pub(super) struct LinkedNotes {
     pub references: HashMap<usize, String>,
     pub backlinks: HashMap<usize, String>,
 }
 
-pub(super) fn link_notes(items: &[&Value], warnings: &mut Vec<String>) -> LinkedNotes {
+pub(super) fn link_notes(
+    items: &[&Value],
+    texts: &[String],
+    warnings: &mut Vec<String>,
+) -> LinkedNotes {
     let mut references = HashMap::new();
     let mut backlinks = HashMap::new();
     let mut edits: HashMap<usize, Vec<(Range<usize>, usize)>> = HashMap::new();
@@ -20,8 +24,7 @@ pub(super) fn link_notes(items: &[&Value], warnings: &mut Vec<String>) -> Linked
             continue;
         }
         let page = page_no(item);
-        let text = item_text(item);
-        if let Some(marker) = note_marker(&text) {
+        if let Some(marker) = note_marker(&texts[index]) {
             notes.entry((page, marker)).or_default().push(index);
         } else {
             warnings.push(format!("Page {page}: note has no identifiable marker"));
@@ -36,7 +39,7 @@ pub(super) fn link_notes(items: &[&Value], warnings: &mut Vec<String>) -> Linked
                     && matches!(label(item), "text" | "paragraph" | "list_item")
                 {
                     candidates.extend(
-                        reference_markers(&item_text(item), &marker)
+                        reference_markers(&texts[index], &marker)
                             .into_iter()
                             .map(|range| (index, range)),
                     );
@@ -57,7 +60,7 @@ pub(super) fn link_notes(items: &[&Value], warnings: &mut Vec<String>) -> Linked
 
     for (index, mut edits) in edits {
         edits.sort_unstable_by_key(|(range, _)| range.start);
-        let text = item_text(items[index]);
+        let text = &texts[index];
         let mut html = String::new();
         let mut offset = 0;
         for (range, note_index) in edits {
