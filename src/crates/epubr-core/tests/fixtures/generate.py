@@ -158,6 +158,13 @@ def main():
         + text(176, 403, "A + B = C", 18)
         + b"0.85 w 176 418 m 188 418 l S\n"
         + text(48, 356, "The symbols × and · remain distinct.")
+        + b"BT /F1 12 Tf 48 318 Td (The address space has 2) Tj "
+        b"/F1 8 Tf 4 Ts (25) Tj 0 Ts /F1 12 Tf ( entries.) Tj ET\n"
+        + b"BT /F1 12 Tf 48 289 Td (The probability is p) Tj "
+        b"/F1 8 Tf 4 Ts (n) Tj 0 Ts /F1 12 Tf ( for this case.) Tj ET\n"
+        + text(48, 260, "The identifiers 2 25 remain separate.")
+        + b"BT /F1 12 Tf 48 231 Td (The tolerance is 10) Tj "
+        b"/F1 8 Tf 4 Ts (-6) Tj 0 Ts /F1 12 Tf ( for this case.) Tj ET\n"
     )
     make_pdf("math.pdf", "Boolean Expressions", [math])
     make_pdf("blank.pdf", "Blank Fixture", [b""])

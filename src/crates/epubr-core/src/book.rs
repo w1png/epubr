@@ -6,6 +6,7 @@ mod notes;
 mod order;
 mod reflow;
 mod structure;
+mod superscripts;
 mod symbols;
 
 use std::collections::{HashMap, HashSet};
@@ -177,7 +178,10 @@ pub(crate) fn normalize(
     let reflow = reflow::Reflow::new(doc);
     let mut texts: Vec<_> = items.iter().map(|item| reflow.text(item)).collect();
     let numbering = lists::recover_numbering(&items, &mut texts);
-    let notes = notes::link_notes(&items, &texts, &mut book.warnings);
+    let mut superscripts = superscripts::Superscripts::new(input);
+    let notes = notes::link_notes(&items, &texts, &mut book.warnings, |item, text| {
+        superscripts.html(item, text)
+    });
     let contents = structure::printed_contents(&items, pdf, input);
     let figure_labels = structure::figure_labels(&items);
     let mut geometry = math::PageGeometry::new(pdf, input);
@@ -345,14 +349,17 @@ pub(crate) fn normalize(
                 let reference = notes.references.get(&index);
                 let mathml = if reference.is_none() && math::standalone_equation(&text) {
                     let raw = geometry.recover_overbar(item, &text);
-                    math::presentation(raw.as_deref().unwrap_or(&text))
+                    math::presentation(
+                        &superscripts.expression(item, raw.as_deref().unwrap_or(&text)),
+                    )
                 } else {
                     None
                 };
                 let entry = ListItem {
                     has_mathml: mathml.is_some(),
-                    html: mathml
-                        .unwrap_or_else(|| prose_html(item, text, reference, &mut geometry)),
+                    html: mathml.unwrap_or_else(|| {
+                        prose_html(item, text, reference, &mut geometry, &mut superscripts)
+                    }),
                     number,
                 };
                 if previous_list == Some(group)
@@ -371,14 +378,16 @@ pub(crate) fn normalize(
                 let reference = notes.references.get(&index);
                 if reference.is_none() && math::standalone_equation(&text) {
                     let raw = geometry.recover_overbar(item, &text).unwrap_or(text);
-                    if let Some(mathml) = math::presentation(&raw) {
+                    if let Some(mathml) = math::presentation(&superscripts.expression(item, &raw)) {
                         book.blocks.push(Block::Formula { mathml });
                     } else {
-                        paragraph(&mut book.blocks, &raw);
+                        book.blocks.push(Block::Paragraph {
+                            html: superscripts.html(item, &raw),
+                        });
                     }
                     continue;
                 }
-                let html = prose_html(item, text, reference, &mut geometry);
+                let html = prose_html(item, text, reference, &mut geometry, &mut superscripts);
                 if let Some((previous_item, previous_block)) = previous
                     && let Block::Paragraph { html: prior } = &mut book.blocks[previous_block]
                     && reflow.join(doc, previous_item, item, prior, &html)
@@ -404,11 +413,12 @@ fn prose_html(
     text: String,
     note_reference: Option<&String>,
     geometry: &mut math::PageGeometry<'_>,
+    superscripts: &mut superscripts::Superscripts<'_>,
 ) -> String {
     if let Some(reference) = note_reference {
         return reference.clone();
     }
-    escape_xml(&geometry.recover_inline(item, &text).unwrap_or(text))
+    superscripts.html(item, &geometry.recover_inline(item, &text).unwrap_or(text))
 }
 
 fn paragraph(blocks: &mut Vec<Block>, text: &str) {

@@ -14,6 +14,7 @@ pub(super) fn link_notes(
     items: &[&Value],
     texts: &[String],
     warnings: &mut Vec<String>,
+    mut format_prose: impl FnMut(&Value, &str) -> String,
 ) -> LinkedNotes {
     let mut references = HashMap::new();
     let mut backlinks = HashMap::new();
@@ -68,7 +69,7 @@ pub(super) fn link_notes(
                 continue;
             }
             let id = format!("noteref-{note_index}");
-            html.push_str(&escape_xml(&text[offset..range.start]));
+            html.push_str(&format_prose(items[index], &text[offset..range.start]));
             html.push_str(&format!(
                 "<a id=\"{id}\" href=\"#note-{note_index}\" epub:type=\"noteref\">{}</a>",
                 escape_xml(&text[range.clone()])
@@ -76,7 +77,7 @@ pub(super) fn link_notes(
             offset = range.end;
             backlinks.insert(note_index, id);
         }
-        html.push_str(&escape_xml(&text[offset..]));
+        html.push_str(&format_prose(items[index], &text[offset..]));
         references.insert(index, html);
     }
     warnings.sort();

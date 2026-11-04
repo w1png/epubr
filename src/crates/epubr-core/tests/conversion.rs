@@ -195,6 +195,21 @@ fn notes_link_to_the_correct_text_and_back_to_the_reference() {
 }
 
 #[test]
+fn preserves_source_superscripts_without_joining_baseline_numbers() {
+    let epub = convert_fixture("math.pdf", text_mode(), |_| {});
+    let prose = epub
+        .spine
+        .iter()
+        .map(|content| content.xml.as_str())
+        .collect::<String>();
+
+    assert!(prose.contains("The address space has 2<sup>25</sup> entries."));
+    assert!(prose.contains("The probability is p<sup>n</sup> for this case."));
+    assert!(prose.contains("The identifiers 2 25 remain separate."));
+    assert!(prose.contains("The tolerance is 10<sup>-6</sup> for this case."));
+}
+
+#[test]
 fn mathml_preserves_the_negation_overbar_without_duplicate_text() {
     let epub = convert_fixture("math.pdf", text_mode(), |_| {});
 
