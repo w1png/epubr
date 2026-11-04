@@ -101,6 +101,7 @@ pub(crate) fn extract_for_conversion(
     } else {
         Vec::new()
     };
+    crate::book::repair_symbols(&mut document, pdf);
     Ok((document, warnings))
 }
 

@@ -1,8 +1,10 @@
 mod code;
 mod math;
 mod notes;
+mod order;
 mod reflow;
 mod structure;
+mod symbols;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -14,6 +16,7 @@ use serde_json::Value;
 pub(crate) use math::{SourceCrops, locate_placeholders};
 use reflow::clean_text;
 pub(crate) use structure::TableCell;
+pub(crate) use symbols::repair_symbols;
 
 pub(crate) struct Book {
     pub title: String,
@@ -123,7 +126,8 @@ pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
         navigation: Vec::new(),
         warnings: Vec::new(),
     };
-    let items = ordered_items(doc);
+    let mut items = ordered_items(doc);
+    order::repair(&mut items);
     let notes = notes::link_notes(&items, &mut book.warnings);
     let contents = structure::printed_contents(&items);
     let figure_labels = structure::figure_labels(&items);
@@ -381,12 +385,12 @@ fn ordered_items(doc: &Value) -> Vec<&Value> {
         }
         items.push(item);
         if let Some(children) = item["children"].as_array() {
-            let captions = item["captions"].as_array();
+            let captions = structure::caption_refs(doc, item);
             stack.extend(
                 children
                     .iter()
                     .rev()
-                    .filter(|child| captions.is_none_or(|captions| !captions.contains(child)))
+                    .filter(|child| !captions.contains(child))
                     .filter_map(|child| get_ref(doc, child)),
             );
         }
@@ -407,10 +411,8 @@ fn item_text(item: &Value) -> String {
 }
 
 fn caption(doc: &Value, item: &Value) -> String {
-    item["captions"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    structure::caption_refs(doc, item)
+        .iter()
         .filter_map(|reference| get_ref(doc, reference))
         .map(item_text)
         .filter(|text| !text.is_empty())

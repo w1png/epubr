@@ -417,7 +417,7 @@ impl<'a> PageGeometry<'a> {
 fn comparable(c: char) -> char {
     match c {
         '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
-        _ => c,
+        _ => super::symbols::comparison_character(c),
     }
 }
 

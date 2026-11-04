@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use super::{Block, NavEntry, item_text, label, page_no};
+use super::{Block, NavEntry, get_ref, item_text, label, page_no};
 
 #[derive(Clone, Default)]
 pub(crate) struct TableCell {
@@ -293,6 +293,50 @@ fn unique<T>(mut values: impl Iterator<Item = T>) -> Option<T> {
     values.next().is_none().then_some(value)
 }
 
+/// A picture can have the wrong caption attached even though the real
+/// caption is in its child list. Require a unique nearby numbered caption.
+pub(super) fn caption_refs<'a>(doc: &Value, item: &'a Value) -> &'a [Value] {
+    let current = item["captions"].as_array().map_or(&[][..], Vec::as_slice);
+    if label(item) != "picture"
+        || current
+            .iter()
+            .any(|reference| get_ref(doc, reference).is_some_and(numbered_figure_caption))
+    {
+        return current;
+    }
+    let page = page_no(item);
+    let Some(bounds) = Bounds::from_item(item).filter(|_| page > 0) else {
+        return current;
+    };
+    let candidates = item["children"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|reference| {
+            get_ref(doc, reference).is_some_and(|child| {
+                label(child) == "caption"
+                    && page_no(child) == page
+                    && numbered_figure_caption(child)
+                    && Bounds::from_item(child).is_some_and(|caption| bounds.near(&caption))
+            })
+        });
+    unique(candidates).map_or(current, std::slice::from_ref)
+}
+
+fn numbered_figure_caption(item: &Value) -> bool {
+    let text = item_text(item);
+    let mut words = text.split_whitespace();
+    let Some(label) = words.next() else {
+        return false;
+    };
+    matches!(
+        label.trim_end_matches('.').to_lowercase().as_str(),
+        "figure" | "fig" | "рис"
+    ) && words
+        .next()
+        .is_some_and(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// Identify chart labels already represented in a retained picture. Require
 /// both a Docling parent link and a bounding box within the actual crop.
 pub(super) fn figure_labels(items: &[&Value]) -> HashSet<usize> {
@@ -361,5 +405,44 @@ impl Bounds {
             && other.x.1 <= self.x.1 + MARGIN
             && other.y.0 >= self.y.0 - MARGIN
             && other.y.1 <= self.y.1 + MARGIN
+    }
+
+    fn near(&self, other: &Self) -> bool {
+        const MAX_GAP: f64 = 24.0;
+        self.top_left == other.top_left
+            && self.x.0 < other.x.1
+            && other.x.0 < self.x.1
+            && self.y.0 - other.y.1 <= MAX_GAP
+            && other.y.0 - self.y.1 <= MAX_GAP
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn selects_only_a_unique_numbered_caption_near_the_picture() {
+        let region = json!([{"page_no": 5, "bbox": {
+            "coord_origin": "BOTTOMLEFT", "l": 50, "r": 400, "b": 83, "t": 220
+        }}]);
+        let mut doc = json!({"texts": [
+            {"label": "caption", "text": "В листинге 6.1 показано решение задачи"},
+            {"label": "caption", "text": "Рис. 6.24. Кольцевой буфер", "prov": region},
+            {"label": "caption", "text": "Рис. 6.25. Другая схема", "prov": region}
+        ]});
+        let wrong = json!({"$ref": "#/texts/0"});
+        let correct = json!({"$ref": "#/texts/1"});
+        let picture = json!({
+            "label": "picture", "prov": region,
+            "captions": [wrong],
+            "children": [wrong, correct, {"$ref": "#/texts/2"}]
+        });
+        assert_eq!(caption_refs(&doc, &picture), std::slice::from_ref(&wrong));
+
+        doc["texts"][2]["prov"][0]["page_no"] = json!(6);
+        assert_eq!(caption_refs(&doc, &picture), std::slice::from_ref(&correct));
     }
 }
