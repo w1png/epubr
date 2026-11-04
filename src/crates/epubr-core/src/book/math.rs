@@ -136,13 +136,28 @@ pub(crate) fn locate_placeholders(doc: &mut Value, input: &Path) {
                         .and_then(|item| item["text"].as_str())
                         .map(without_whitespace)
                         .unwrap_or_default();
-                    if let Some(ink) = parsed
+                    let previous_lines: Vec<_> = parsed
                         .cells
+                        .iter()
+                        .filter(|cell| {
+                            let line = without_whitespace(&cell.text);
+                            line.len() >= 12 && previous_text.contains(&line)
+                        })
+                        .collect();
+                    // Prose line assembly can drop disconnected script runs
+                    // on the left side of a display. Use smaller source runs
+                    // for the crop, excluding lines already emitted as prose.
+                    if let Some(ink) = parsed
+                        .code_cells
                         .iter()
                         .filter(inside)
                         .filter(|cell| {
-                            let line = without_whitespace(&cell.text);
-                            line.len() < 12 || !previous_text.contains(&line)
+                            !previous_lines.iter().any(|line| {
+                                cell.l >= line.l - 0.5
+                                    && cell.r <= line.r + 0.5
+                                    && cell.t >= line.t - 0.5
+                                    && cell.b <= line.b + 0.5
+                            })
                         })
                         .inspect(|cell| source.push_str(&cell.text))
                         .map(to_bounds)
@@ -153,7 +168,12 @@ pub(crate) fn locate_placeholders(doc: &mut Value, input: &Path) {
                             bottom: a.bottom.min(b.bottom),
                         })
                     {
-                        bounds = ink;
+                        // Tall delimiters can be painted separately from the
+                        // recognized runs. Allow room on both sides.
+                        bounds.left = bounds.left.max(ink.left - 5.0);
+                        bounds.right = bounds.right.min(ink.right + 5.0);
+                        bounds.top = bounds.top.min(ink.top + 2.0);
+                        bounds.bottom = bounds.bottom.max(ink.bottom - 2.0);
                     }
                 }
             }

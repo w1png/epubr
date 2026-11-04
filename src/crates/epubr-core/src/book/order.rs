@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::label;
 
-/// Repair local inversions among ordinary paragraphs in the same column.
+/// Repair local inversions in same-column prose and same-level list runs.
 /// Other block types, group boundaries and page breaks keep their Docling order.
 pub(super) fn repair(items: &mut [&Value]) {
     let mut offset = 0;
@@ -45,6 +45,7 @@ pub(super) fn repair(items: &mut [&Value]) {
 struct Region<'a> {
     parent: &'a str,
     page: u64,
+    list_item: bool,
     top_left: bool,
     left: f64,
     right: f64,
@@ -54,7 +55,7 @@ struct Region<'a> {
 
 impl<'a> Region<'a> {
     fn from_item(item: &'a Value) -> Option<Self> {
-        if !matches!(label(item), "text" | "paragraph")
+        if !matches!(label(item), "text" | "paragraph" | "list_item")
             || item["children"]
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
@@ -75,6 +76,7 @@ impl<'a> Region<'a> {
         let region = Self {
             parent: item["parent"]["$ref"].as_str()?,
             page,
+            list_item: label(item) == "list_item",
             top_left,
             left: bbox["l"].as_f64()?,
             right: bbox["r"].as_f64()?,
@@ -85,12 +87,20 @@ impl<'a> Region<'a> {
     }
 
     fn same_column(self, other: Self) -> bool {
-        let overlap = self.right.min(other.right) - self.left.max(other.left);
-        let width = (self.right - self.left).max(other.right - other.left);
+        let aligned = if self.list_item {
+            // A short step can end far earlier than its siblings. Their
+            // shared parent and left indentation identify the list level.
+            (self.left - other.left).abs() <= 2.0
+        } else {
+            let overlap = self.right.min(other.right) - self.left.max(other.left);
+            let width = (self.right - self.left).max(other.right - other.left);
+            overlap >= width * 0.85
+        };
         self.page == other.page
             && self.parent == other.parent
+            && self.list_item == other.list_item
             && self.top_left == other.top_left
-            && overlap >= width * 0.85
+            && aligned
     }
 }
 
@@ -142,6 +152,24 @@ mod tests {
             items,
             [&blocks[1], &blocks[0], &blocks[2], &blocks[4], &blocks[3]]
         );
+    }
+
+    #[test]
+    fn repairs_inverted_list_items_even_when_one_is_short() {
+        let list_item = |text, bounds| {
+            let mut item = paragraph(text, 545, bounds);
+            item["label"] = json!("list_item");
+            item["parent"]["$ref"] = json!("#/groups/0");
+            item
+        };
+        let blocks = [
+            list_item("Choose input", [89.50, 204.22, 348.55, 184.71]),
+            list_item("Check result", [89.50, 171.70, 362.32, 148.29]),
+            list_item("Run algorithm", [89.50, 186.01, 242.70, 169.10]),
+        ];
+        let mut items: Vec<_> = blocks.iter().collect();
+        repair(&mut items);
+        assert_eq!(items, [&blocks[0], &blocks[2], &blocks[1]]);
     }
 
     #[test]

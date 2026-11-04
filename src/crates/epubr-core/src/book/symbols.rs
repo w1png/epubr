@@ -4,12 +4,23 @@ use lopdf::{Document, Object, ObjectId, content::Content};
 use serde_json::Value;
 
 const STRESS_MARK: char = '\u{e088}';
+const WINGDINGS_BULLET: char = '\u{f0e8}';
+const STAR_BULLET: char = '✦';
 // The PDF encodes these glyphs in each font's private-use space.
-const SYMBOLS: [(char, &[u8], char); 4] = [
+const SYMBOLS: [(char, &[u8], char); 13] = [
     ('\u{f0cd}', b"Wingdings2", '×'),
     ('\u{f0ce}', b"Wingdings2", '×'),
     ('\u{f09e}', b"Wingdings-Regular", '·'),
     (STRESS_MARK, b"SchoolBookAC", '\u{0301}'),
+    ('\u{f021}', b"Wingdings3", '←'),
+    ('\u{f022}', b"Wingdings3", '→'),
+    ('\u{f023}', b"Wingdings3", '↑'),
+    ('\u{f024}', b"Wingdings3", '↓'),
+    ('\u{f066}', b"Wingdings3", '←'),
+    ('\u{f067}', b"Wingdings3", '→'),
+    ('\u{f084}', b"Wingdings3", '▶'),
+    ('\u{f0c8}', b"Wingdings-Regular", '⤴'),
+    (WINGDINGS_BULLET, b"Wingdings2", STAR_BULLET),
 ];
 const MATCHING_FONT: u8 = 1;
 const OTHER_FONT: u8 = 2;
@@ -33,8 +44,15 @@ pub(crate) fn repair_symbols(document: &mut Value, pdf: &Document) {
     if let Some(texts) = document["texts"].as_array_mut() {
         for item in texts {
             if let Some(text) = item["text"].as_str()
-                && let Some(repaired) = evidence.repair(text, &item["prov"])
+                && let Some(mut repaired) = evidence.repair(text, &item["prov"])
             {
+                // The EPUB list already supplies its own visible marker.
+                if super::label(item) == "list_item"
+                    && text.trim_start().starts_with(WINGDINGS_BULLET)
+                    && let Some(rest) = repaired.trim_start().strip_prefix(STAR_BULLET)
+                {
+                    repaired = rest.trim_start().to_owned();
+                }
                 item["text"] = Value::String(repaired);
             }
         }
@@ -190,7 +208,7 @@ fn font_family(name: &[u8]) -> &[u8] {
     }
 }
 
-fn is_image(pdf: &Document, page: ObjectId, name: &[u8]) -> bool {
+pub(super) fn is_image(pdf: &Document, page: ObjectId, name: &[u8]) -> bool {
     let Ok((direct, inherited)) = pdf.get_page_resources(page) else {
         return false;
     };
@@ -220,18 +238,18 @@ mod tests {
 
     #[test]
     fn repairs_only_font_proven_glyphs_and_places_stress_on_the_vowel() {
-        let proven = [
-            MATCHING_FONT,
-            MATCHING_FONT | OTHER_FONT,
-            MATCHING_FONT,
-            MATCHING_FONT,
-        ];
+        let mut proven = [MATCHING_FONT; SYMBOLS.len()];
+        proven[1] |= OTHER_FONT;
         assert_eq!(
             replace(
                 "2 \u{f0cd} 2, \u{f0ce}, CS\u{f09e}RD, временн\u{e088}ая, \u{e088}x",
                 proven
             ),
             "2 × 2, \u{f0ce}, CS·RD, временна́я, \u{e088}x"
+        );
+        assert_eq!(
+            replace("DST \u{f066} SRC; h \u{f067} 1; r\u{f021}\u{f022}e", proven),
+            "DST ← SRC; h → 1; r←→e"
         );
     }
 

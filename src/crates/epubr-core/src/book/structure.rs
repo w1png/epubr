@@ -2,10 +2,64 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use docling_pdf::textparse::PageTextParser;
-use lopdf::{Document, TocType};
+use lopdf::{Document, ObjectId, Outline, TocType, decode_text_string};
 use serde_json::Value;
 
-use super::{Block, NavEntry, get_ref, item_text, label, page_no};
+use super::{Block, NavEntry, clean_text, get_ref, item_text, label, page_no, resolve};
+
+pub(super) fn pdf_outline(pdf: &Document) -> Vec<TocType> {
+    let Ok(Some(outlines)) = pdf.get_outlines(None, None, &mut Default::default()) else {
+        return Vec::new();
+    };
+    let pages = pdf
+        .get_pages()
+        .into_iter()
+        .map(|(page, id)| (id, page))
+        .collect();
+    let mut bookmarks = Vec::new();
+    collect_bookmarks(pdf, &outlines, &pages, 1, &mut bookmarks);
+    bookmarks
+}
+
+fn collect_bookmarks(
+    pdf: &Document,
+    outlines: &[Outline],
+    pages: &HashMap<ObjectId, u32>,
+    level: usize,
+    bookmarks: &mut Vec<TocType>,
+) {
+    for outline in outlines {
+        match outline {
+            Outline::Destination(destination) => {
+                let Some(page) = destination
+                    .page()
+                    .and_then(lopdf::Object::as_reference)
+                    .ok()
+                    .and_then(|id| pages.get(&id))
+                else {
+                    continue;
+                };
+                let Some(title) = destination
+                    .title()
+                    .and_then(|object| decode_text_string(resolve(pdf, object)))
+                    .ok()
+                    .map(|title| clean_text(&title.replace(['\u{00ad}', '\u{feff}'], "")))
+                    .filter(|title| !title.is_empty())
+                else {
+                    continue;
+                };
+                bookmarks.push(TocType {
+                    level,
+                    title,
+                    page: *page as usize,
+                });
+            }
+            Outline::SubOutlines(children) => {
+                collect_bookmarks(pdf, children, pages, level + 1, bookmarks);
+            }
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct TableCell {
@@ -225,23 +279,44 @@ fn contents_from_bookmarks(
     pdf: &Document,
     input: &Path,
 ) -> Option<PrintedContents> {
-    let toc = pdf.get_toc().ok()?.toc;
-    let (index, bookmark) = toc.iter().enumerate().find(|(_, entry)| {
+    let toc = pdf_outline(pdf);
+    let bookmark = toc.iter().enumerate().find(|(_, entry)| {
         (1..=40).contains(&entry.page)
             && (contents_title(&entry.title) || title_key(&entry.title) == "toc")
-    })?;
-    let first = bookmark.page;
-    let end = toc[index + 1..]
-        .iter()
-        .find(|entry| entry.level <= bookmark.level && entry.page > first)?
-        .page;
-    if !(2..=16).contains(&(end - first)) {
+    });
+    let (first, end) = if let Some((index, bookmark)) = bookmark {
+        let end = toc[index + 1..]
+            .iter()
+            .find(|entry| entry.level <= bookmark.level && entry.page > bookmark.page)?
+            .page;
+        (bookmark.page, end)
+    } else {
+        let end = toc.first()?.page;
+        let first = items.iter().find_map(|item| {
+            let page = page_no(item) as usize;
+            (page > 0 && page < end && heading(item) && contents_title(&item_text(item)))
+                .then_some(page)
+        })?;
+        (first, end)
+    };
+    if first > 40 || !(2..=16).contains(&(end - first)) {
         return None;
     }
     let pages = first as u64..end as u64;
-    let marker = items.iter().position(|item| {
+    let first_title = items.iter().position(|item| {
         page_no(item) == pages.start && heading(item) && contents_title(&item_text(item))
     })?;
+    let marker = items
+        .iter()
+        .position(|item| {
+            pages.contains(&page_no(item))
+                && heading(item)
+                && matches!(
+                    title_key(&item_text(item)).as_str(),
+                    "contents" | "tableofcontents" | "оглавление" | "содержание"
+                )
+        })
+        .unwrap_or(first_title);
     let outline: Vec<_> = toc.into_iter().filter(|entry| entry.page >= end).collect();
     if outline.len() < 4
         || !items.iter().any(|item| {
@@ -589,6 +664,37 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn decodes_pdf_bookmark_titles_at_each_depth() {
+        use lopdf::{Destination, Object, StringFormat};
+
+        let page = (1, 0);
+        let destination = |title| {
+            Outline::Destination(Destination::new(
+                title,
+                Object::Reference(page),
+                Object::Name(b"Fit".to_vec()),
+            ))
+        };
+        let outlines = [
+            destination(Object::string_literal(b"Cryptography")),
+            Outline::SubOutlines(vec![destination(Object::String(
+                b"Goldwasser\x85Micali".to_vec(),
+                StringFormat::Literal,
+            ))]),
+        ];
+        let mut bookmarks = Vec::new();
+        collect_bookmarks(
+            &Document::new(),
+            &outlines,
+            &HashMap::from([(page, 10)]),
+            1,
+            &mut bookmarks,
+        );
+        assert_eq!(bookmarks[1].title, "Goldwasser–Micali");
+        assert_eq!((bookmarks[1].level, bookmarks[1].page), (2, 10));
+    }
 
     #[test]
     fn bookmarks_link_to_same_page_sections_and_fall_back_to_source_page() {

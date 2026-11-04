@@ -416,12 +416,9 @@ fn outline_navigation(
     blocks: &[Block],
     headings: &[(u64, usize)],
 ) -> Vec<NavEntry> {
-    let Ok(toc) = pdf.get_toc() else {
-        return Vec::new();
-    };
     let mut entries = Vec::new();
     let mut used = HashSet::new();
-    for entry in toc.toc {
+    for entry in structure::pdf_outline(pdf) {
         let page = entry.page as u64;
         let title = clean_text(&entry.title);
         // Match the actual heading on that source page. A page-only bookmark

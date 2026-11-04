@@ -26,7 +26,7 @@ pre { font-family: monospace; font-size: 0.88em; white-space: pre-wrap; overflow
 table { border-collapse: collapse; max-width: 100%; }
 td, th { padding: 0.2em 0.4em; border: 1px solid; overflow-wrap: anywhere; }
 th { text-align: start; }
-.contents ol { padding-inline-start: 1.5em; }
+.contents ol, #toc ol { list-style: none; padding-inline-start: 1.5em; }
 .contents li { margin-block: 0.35em; }
 "#;
 const CONTENT: &str = "content.xhtml";
