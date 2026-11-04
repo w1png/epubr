@@ -1,11 +1,17 @@
 //! PDF extraction and conversion interfaces for Epubr.
 
+mod book;
 mod conversion;
+mod epub;
+mod extraction;
 mod models;
 
 pub use conversion::{
     CancellationToken, ConversionError, ConversionOptions, ConversionReport, convert,
+    convert_with_models,
 };
+#[doc(hidden)]
+pub use extraction::run_extraction_worker;
 pub use models::{ModelConfig, ModelError, ModelProfile, PreparedModels};
 
 use std::fmt;

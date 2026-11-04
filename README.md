@@ -1,9 +1,8 @@
 # Epubr
 
 Epubr is a Rust workspace for converting technical PDFs to reflowable EPUB 3.
-The current milestone is the linked Docling extraction check.
 
-- `epubr-core` contains the extraction API and owns the converter boundary.
+- `epubr-core` provides the PDF-to-EPUB conversion API and a Docling extraction worker.
 - `epubr-cli` contains the command-line entry point. Its current executable,
   `epubr-docling-probe`, emits the extracted document as JSON.
 
@@ -27,6 +26,18 @@ cargo run --release --locked -p epubr-cli -- raw/input.pdf \
 - `EPUBR_MODEL` and `EPUBR_MODEL_DIR` set defaults for the corresponding flags.
   A future web entry point can read the same settings with
   `epubr_core::ModelConfig::from_env()`.
+
+## Core conversion
+
+Use `epubr_core::convert` to read model settings from the environment or
+`epubr_core::convert_with_models` to pass a `ModelConfig` explicitly.
+Both accept a cancellation token and a progress callback. Build the workspace
+to produce `epubr-extract-worker` alongside the host executable, or set
+`EPUBR_EXTRACTION_WORKER` to the worker's executable path.
+
+The end-to-end tests use the pinned model cache. To run them with a
+preinstalled snapshot, set `EPUBR_MODEL_DIR` to the directory containing
+`.models/`.
 
 See the [technical-book acceptance cases](docs/acceptance.md) for the pages
 used to check extraction and reader compatibility.

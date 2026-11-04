@@ -4,11 +4,12 @@ mod tests;
 
 use std::env;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::thread;
 use std::time::Duration;
 
 use directories_next::ProjectDirs;
@@ -139,10 +140,14 @@ impl ModelConfig {
         let base = format!("{RELEASES}/{SNAPSHOT}");
         for asset in STANDARD.iter().chain(formula) {
             let path = root.join(".models").join(asset.path);
+            if is_verified(&path, asset, cancellation)? {
+                continue;
+            }
+            if !managed {
+                return Err(ModelError::InvalidAsset(path));
+            }
+            let _lock = lock_downloads(&root, cancellation)?;
             if !is_verified(&path, asset, cancellation)? {
-                if !managed {
-                    return Err(ModelError::InvalidAsset(path));
-                }
                 download_asset(&agent, &base, asset, &path, cancellation, &on_progress)?;
             }
         }
@@ -186,6 +191,26 @@ impl PreparedModels {
             ("DOCLING_CODE_FORMULA_DIR", "code_formula"),
         ] {
             command.env(key, models.join(path));
+        }
+    }
+}
+
+fn lock_downloads(root: &Path, cancellation: &CancellationToken) -> Result<File, ModelError> {
+    let path = root.join(".download.lock");
+    let lock = io_at(
+        &path,
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path),
+    )?;
+    loop {
+        check_cancelled(cancellation)?;
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(50)),
+            Err(TryLockError::Error(error)) => return io_at(&path, Err(error)),
         }
     }
 }
