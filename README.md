@@ -63,12 +63,3 @@ its path. The `epubr` CLI uses the same executable for its worker.
 The end-to-end tests use the pinned model cache. To run them with a
 preinstalled snapshot, set `EPUBR_MODEL_DIR` to the directory containing
 `.models/`.
-
-See the [technical-book acceptance cases](docs/acceptance.md) for the pages
-used to check extraction and reader compatibility.
-
-## LLM Wiki
-
-Start at the [wiki index](wiki/index.md). The wiki uses ordinary Markdown and can be browsed on GitHub or opened in Obsidian by selecting this folder as a vault.
-
-Put source files or pinned URL records in [`raw/`](raw/), then ask Codex to ingest them. Ask questions against the wiki, save an answer you want to reuse, or ask for a lint pass. The [agent schema](AGENTS.md) defines those workflows. The [activity log](wiki/log.md) records completed work.
