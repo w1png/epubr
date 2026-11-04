@@ -75,7 +75,15 @@ pub fn convert(
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {
-    convert_inner(input, output, options, None, cancellation, on_progress)
+    convert_inner(
+        input,
+        output,
+        options,
+        None,
+        None,
+        cancellation,
+        on_progress,
+    )
 }
 
 /// Convert using a caller-selected model profile and model directory.
@@ -92,6 +100,28 @@ pub fn convert_with_models(
         output,
         options,
         Some(models),
+        None,
+        cancellation,
+        on_progress,
+    )
+}
+
+/// Convert using a host executable that implements the extraction worker protocol.
+pub fn convert_with_worker(
+    input: &Path,
+    output: &Path,
+    options: ConversionOptions,
+    models: &ModelConfig,
+    worker: &Path,
+    cancellation: &CancellationToken,
+    on_progress: impl Fn(Progress) + Sync,
+) -> Result<ConversionReport, ConversionError> {
+    convert_inner(
+        input,
+        output,
+        options,
+        Some(models),
+        Some(worker),
         cancellation,
         on_progress,
     )
@@ -102,6 +132,7 @@ fn convert_inner(
     output: &Path,
     options: ConversionOptions,
     models: Option<&ModelConfig>,
+    worker: Option<&Path>,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {
@@ -140,6 +171,7 @@ fn convert_inner(
             pages: options.pages,
         },
         models,
+        worker,
         cancellation,
         &on_progress,
     )?;

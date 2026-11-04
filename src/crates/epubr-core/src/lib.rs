@@ -8,10 +8,10 @@ mod models;
 
 pub use conversion::{
     CancellationToken, ConversionError, ConversionOptions, ConversionReport, convert,
-    convert_with_models,
+    convert_with_models, convert_with_worker,
 };
 #[doc(hidden)]
-pub use extraction::run_extraction_worker;
+pub use extraction::{EXTRACTION_WORKER_FLAG, run_extraction_worker};
 pub use models::{ModelConfig, ModelError, ModelProfile, PreparedModels};
 
 use std::fmt;

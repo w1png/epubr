@@ -3,6 +3,7 @@ name = "epubr-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "epubr"
 
 [[bin]]
 name = "epubr-docling-probe"
@@ -10,4 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }
+ctrlc = { version = "3.5", features = ["termination"] }
 epubr-core.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27"

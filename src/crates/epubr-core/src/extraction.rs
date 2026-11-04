@@ -14,7 +14,7 @@ use crate::{
 };
 
 const WORKER_NAME: &str = "epubr-extract-worker";
-const WORKER_FLAG: &str = "--epubr-extraction-worker";
+pub const EXTRACTION_WORKER_FLAG: &str = "--epubr-extraction-worker";
 
 #[derive(Deserialize, Serialize)]
 enum WorkerEvent {
@@ -41,11 +41,15 @@ pub(crate) fn extract_for_conversion(
     input: &Path,
     options: ExtractionOptions,
     models: &ModelConfig,
+    worker: Option<&Path>,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<Extracted, ConversionError> {
     let input = input.canonicalize().map_err(ConversionError::Io)?;
-    let worker = worker_path()?;
+    let worker = match worker {
+        Some(path) => path.canonicalize()?,
+        None => worker_path()?,
+    };
     let prepared = models
         .prepare(cancellation, &on_progress)
         .map_err(|error| match error {
@@ -53,13 +57,19 @@ pub(crate) fn extract_for_conversion(
             error => ConversionError::Models(error),
         })?;
     let mut command = Command::new(worker);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+    }
     let mode = match options.mode {
         OcrMode::Auto => "auto",
         OcrMode::Text => "text",
         OcrMode::Scan => "scan",
     };
     command
-        .arg(WORKER_FLAG)
+        .arg(EXTRACTION_WORKER_FLAG)
         .arg(input)
         .arg(models.profile.to_string())
         .arg(mode)
@@ -209,7 +219,7 @@ pub fn run_extraction_worker() -> ExitCode {
 
 fn worker_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
-    if args.next().as_deref() != Some(WORKER_FLAG.as_ref()) {
+    if args.next().as_deref() != Some(EXTRACTION_WORKER_FLAG.as_ref()) {
         return Err("invalid extraction worker invocation".into());
     }
     let input = args.next().ok_or("missing worker input")?;

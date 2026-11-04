@@ -2,19 +2,17 @@
 
 Epubr is a Rust workspace for converting technical PDFs to reflowable EPUB 3.
 
-- `epubr-core` provides the PDF-to-EPUB conversion API and a Docling extraction worker.
-- `epubr-cli` contains the command-line entry point. Its current executable,
-  `epubr-docling-probe`, emits the extracted document as JSON.
-
-The probe downloads and verifies pinned Docling assets on first use, then
-reuses the verified cache offline. It reports download bytes and extraction
-progress on stderr and writes JSON to stdout.
+The CLI downloads and verifies pinned Docling assets on first use, then reuses
+the verified cache offline. It reports progress on stderr and publishes the EPUB
+when conversion succeeds. Press Ctrl-C to cancel.
 
 ```sh
-cargo run --release --locked -p epubr-cli -- raw/input.pdf \
-  --model standard --pages 24-30 --mode text > extraction.json
+just release
+./target/release/epubr convert raw/hard.pdf -o hard.epub --model standard --mode text
 ```
 
+- `--mode auto` uses OCR as needed, `--mode text` uses the PDF's text layer,
+  and `--mode scan` forces OCR. Use `--pages 24-30` for an inclusive range.
 - `--model standard` selects layout, tables, and multilingual OCR (about 295 MiB).
   `--model technical` adds formula enrichment (about 1.01 GiB total) and is the
   default. Both profiles share cached assets.
@@ -24,16 +22,19 @@ cargo run --release --locked -p epubr-cli -- raw/input.pdf \
   `$XDG_CACHE_HOME/epubr` or `~/.cache/epubr`, and on macOS,
   `~/Library/Caches/epubr`).
 - `EPUBR_MODEL` and `EPUBR_MODEL_DIR` set defaults for the corresponding flags.
-  A future web entry point can read the same settings with
-  `epubr_core::ModelConfig::from_env()`.
+- `--quiet` suppresses progress output.
+
+Use `just debug convert raw/hard.pdf -o hard-preview.epub --pages 172-176`
+for a short debug run. The separate `epubr-docling-probe` binary still emits
+Docling JSON for extraction diagnostics.
 
 ## Core conversion
 
 Use `epubr_core::convert` to read model settings from the environment or
 `epubr_core::convert_with_models` to pass a `ModelConfig` explicitly.
-Both accept a cancellation token and a progress callback. Build the workspace
-to produce `epubr-extract-worker` alongside the host executable, or set
-`EPUBR_EXTRACTION_WORKER` to the worker's executable path.
+Both accept a cancellation token and a progress callback. Library consumers can
+build the companion `epubr-extract-worker` or set `EPUBR_EXTRACTION_WORKER` to
+its path. The `epubr` CLI uses the same executable for its worker.
 
 The end-to-end tests use the pinned model cache. To run them with a
 preinstalled snapshot, set `EPUBR_MODEL_DIR` to the directory containing
