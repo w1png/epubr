@@ -16,14 +16,15 @@ pub struct ConversionOptions {
     pub pages: Option<(usize, usize)>,
 }
 
-/// Metadata supplied by the caller for the generated EPUB.
+/// Explicit metadata for the generated EPUB. Omitted fields are inferred.
 #[derive(Debug, Default)]
 pub struct MetadataOverrides {
     pub title: Option<String>,
-    /// Replaces the PDF author when at least one author is supplied.
+    /// Replaces the inferred author list when at least one author is supplied.
     pub authors: Vec<String>,
     /// Publication year, from 1 to 9999.
     pub year: Option<u16>,
+    pub edition: Option<String>,
     pub language: Option<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,

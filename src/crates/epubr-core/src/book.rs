@@ -2,6 +2,7 @@ mod code;
 mod cover;
 mod lists;
 mod math;
+mod metadata;
 mod notes;
 mod order;
 mod reflow;
@@ -13,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use lopdf::{Document, Object, decode_text_string};
+use lopdf::{Document, Object};
 use serde_json::Value;
 
 use crate::MetadataOverrides;
@@ -29,6 +30,7 @@ pub(crate) struct Book {
     pub authors: Vec<String>,
     pub language: String,
     pub year: Option<u16>,
+    pub edition: Option<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,
     pub blocks: Vec<Block>,
@@ -124,46 +126,24 @@ pub(crate) fn normalize(
     doc: &Value,
     pdf: &Document,
     input: &Path,
-    overrides: MetadataOverrides,
+    mut overrides: MetadataOverrides,
 ) -> Book {
-    let info = pdf
-        .trailer
-        .get(b"Info")
-        .ok()
-        .and_then(|obj| resolve(pdf, obj).as_dict().ok());
-    let source_title = info
-        .and_then(|info| metadata(pdf, info.get(b"Title").ok()))
-        .or_else(|| {
-            input
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .map(clean_text)
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Untitled".to_owned());
-    let authors = if overrides.authors.is_empty() {
-        info.and_then(|info| metadata(pdf, info.get(b"Author").ok()))
-            .into_iter()
-            .collect()
-    } else {
-        overrides.authors
-    };
-    let language = overrides
-        .language
-        .or_else(|| {
-            pdf.catalog()
-                .ok()
-                .and_then(|catalog| metadata(pdf, catalog.get(b"Lang").ok()))
-                .filter(|lang| is_language_tag(lang))
-        })
-        .unwrap_or_else(|| "und".to_owned());
+    let inferred = metadata::infer(pdf, input);
+    let cover = cover::render(
+        doc,
+        pdf,
+        input,
+        inferred.title.as_deref().unwrap_or("Untitled"),
+    );
+    metadata::fill(&mut overrides, inferred);
 
     let mut book = Book {
-        cover: cover::render(doc, pdf, input, &source_title),
-        title: overrides.title.unwrap_or(source_title),
-        authors,
-        language,
+        cover,
+        title: overrides.title.unwrap_or_else(|| "Untitled".to_owned()),
+        authors: overrides.authors,
+        language: overrides.language.unwrap_or_else(|| "und".to_owned()),
         year: overrides.year,
+        edition: overrides.edition,
         publisher: overrides.publisher,
         description: overrides.description,
         blocks: Vec::new(),
@@ -434,13 +414,6 @@ fn resolve<'a>(pdf: &'a Document, obj: &'a Object) -> &'a Object {
         .ok()
         .and_then(|id| pdf.get_object(id).ok())
         .unwrap_or(obj)
-}
-
-fn metadata(pdf: &Document, object: Option<&Object>) -> Option<String> {
-    decode_text_string(resolve(pdf, object?))
-        .ok()
-        .map(|value| clean_text(&value))
-        .filter(|value| !value.is_empty())
 }
 
 fn outline_navigation(

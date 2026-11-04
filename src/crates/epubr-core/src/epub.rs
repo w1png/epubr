@@ -328,6 +328,14 @@ fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> Str
     if let Some(year) = book.year {
         writeln!(metadata, "  <dc:date>{year:04}</dc:date>").unwrap();
     }
+    if let Some(edition) = &book.edition {
+        writeln!(
+            metadata,
+            "  <meta property=\"schema:bookEdition\">{}</meta>",
+            escape(edition)
+        )
+        .unwrap();
+    }
     if let Some(publisher) = &book.publisher {
         writeln!(
             metadata,
@@ -445,6 +453,7 @@ mod tests {
                 title: Some("Notes de géométrie <révisées>".into()),
                 authors: vec!["A & B".into(), "C. Author".into()],
                 year: Some(2015),
+                edition: Some("Revised & expanded".into()),
                 publisher: Some("Press & Co.".into()),
                 description: Some("An introduction to <math>.".into()),
                 ..MetadataOverrides::default()
@@ -461,6 +470,12 @@ mod tests {
         assert_eq!(values("title"), ["Notes de géométrie <révisées>"]);
         assert_eq!(values("creator"), ["A & B", "C. Author"]);
         assert_eq!(values("date"), ["2015"]);
+        assert_eq!(
+            opf.descendants()
+                .find(|node| node.attribute("property") == Some("schema:bookEdition"))
+                .and_then(|node| node.text()),
+            Some("Revised & expanded")
+        );
         assert_eq!(values("publisher"), ["Press & Co."]);
         assert_eq!(values("description"), ["An introduction to <math>."]);
         assert_eq!(values("language"), ["fr"]);

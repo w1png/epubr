@@ -84,19 +84,23 @@ struct MetadataArgs {
     #[arg(long = "author", value_name = "NAME", value_parser = parse_metadata_text)]
     authors: Vec<String>,
 
-    /// Set the publication year.
+    /// Override the publication year.
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..=9999))]
     year: Option<u16>,
+
+    /// Override the book edition.
+    #[arg(long, value_parser = parse_metadata_text)]
+    edition: Option<String>,
 
     /// Override the book language using a tag such as en or pt-BR.
     #[arg(long, value_name = "TAG", value_parser = parse_language)]
     language: Option<String>,
 
-    /// Set the publisher name.
+    /// Override the publisher name.
     #[arg(long, value_parser = parse_metadata_text)]
     publisher: Option<String>,
 
-    /// Set the book description.
+    /// Override the book description.
     #[arg(long, value_parser = parse_metadata_text)]
     description: Option<String>,
 }
@@ -222,6 +226,7 @@ fn convert(args: ConvertArgs, debug: bool) -> Result<(), ConversionError> {
                     title: args.metadata.title,
                     authors: args.metadata.authors,
                     year: args.metadata.year,
+                    edition: args.metadata.edition,
                     language: args.metadata.language,
                     publisher: args.metadata.publisher,
                     description: args.metadata.description,

@@ -29,14 +29,17 @@ formula-heavy range and compare the EPUB with the PDF.
 epubr convert raw/hard.pdf -o hard-technical-preview.epub --model technical --mode auto --pages 172-176
 ```
 
-Set book metadata when converting a PDF. Repeat `--author` to list multiple
-authors in order. Omitted title, author, and language fields use the
-converter's existing PDF metadata and fallbacks.
+Book metadata is automatic by default. Epubr uses embedded PDF metadata,
+recognizable catalog entries and imprint statements in the opening pages,
+and structured filenames such as `Katz J., Lindell Y. - Book, 2nd Edition - 2015.pdf`.
+It omits optional fields when those sources provide no reliable value.
+Each metadata flag overrides just that field. Repeat `--author` to supply
+the complete author list in order.
 
 ```sh
 epubr convert input.pdf -o output.epub \
   --title "Applied Cryptography Notes" --author "Alex Rivera" --author "Sam Chen" \
-  --year 2024 --language en --publisher "Example Press" \
+  --year 2024 --edition 2 --language en --publisher "Example Press" \
   --description "A reference for engineers."
 ```
 
