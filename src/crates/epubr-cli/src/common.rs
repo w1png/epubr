@@ -78,6 +78,11 @@ impl ProgressReporter {
                 }
             }
             Progress::Finished => eprintln!("Extraction finished"),
+            Progress::Enrichment { completed, total } => {
+                if completed == total || completed.is_multiple_of(PAGE_INTERVAL) {
+                    eprintln!("Decoding code and formulas: {completed}/{total} regions processed");
+                }
+            }
         }
     }
 }

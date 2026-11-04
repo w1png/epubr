@@ -195,7 +195,7 @@ fn notes_link_to_the_correct_text_and_back_to_the_reference() {
 }
 
 #[test]
-fn mathml_preserves_the_negation_overbar_and_raw_expression() {
+fn mathml_preserves_the_negation_overbar_without_duplicate_text() {
     let epub = convert_fixture("math.pdf", text_mode(), |_| {});
 
     let has_overbar = epub.spine.iter().any(|content| {
@@ -226,7 +226,7 @@ fn mathml_preserves_the_negation_overbar_and_raw_expression() {
     let text = epub.spine_text();
     let raw_expression =
         text.contains(r"\overline") || text.contains(r"\bar") || text.contains("A\u{0305}");
-    assert!(raw_expression, "EPUB lost the readable source expression");
+    assert!(!raw_expression, "EPUB duplicated the MathML as raw text");
 }
 
 #[test]

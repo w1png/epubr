@@ -18,10 +18,13 @@ const CONTAINER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 const STYLES: &str = r#"body { line-height: 1.4; }
 figure { margin: 1em 0; }
 img { max-width: 100%; height: auto; }
-figcaption, aside, .formula-source { font-size: 0.9em; }
-.formula-source { white-space: pre-wrap; overflow-wrap: break-word; }
-table { border-collapse: collapse; }
-td { padding: 0.2em 0.4em; border: 1px solid; }
+figcaption, aside { font-size: 0.9em; }
+pre { font-family: monospace; font-size: 0.88em; white-space: pre-wrap; overflow-wrap: break-word; }
+table { border-collapse: collapse; max-width: 100%; }
+td, th { padding: 0.2em 0.4em; border: 1px solid; overflow-wrap: anywhere; }
+th { text-align: start; }
+.contents ol { padding-inline-start: 1.5em; }
+.contents li { margin-block: 0.35em; }
 "#;
 const CONTENT: &str = "content.xhtml";
 
@@ -44,7 +47,7 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     zip.write_all(STYLES.as_bytes())?;
 
     let mut content = xhtml_start(&book.title, &book.language);
-    let mut headings = Vec::new();
+    let headings = navigation_headings(book);
     let mut image_manifest = String::new();
     let mut image_count = 0;
     let mut has_mathml = false;
@@ -54,11 +57,6 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
         match block {
             Block::Heading { level, id, text } => {
                 let level = (*level).clamp(1, 6);
-                headings.push(Heading {
-                    level,
-                    id,
-                    title: text,
-                });
                 writeln!(
                     content,
                     "<h{level} id=\"{}\">{}</h{level}>",
@@ -67,8 +65,25 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 )
                 .unwrap();
             }
+            Block::Contents { title } => {
+                writeln!(
+                    content,
+                    "<nav class=\"contents\" aria-labelledby=\"contents-heading\"><h2 id=\"contents-heading\">{}</h2>",
+                    escape(title)
+                )
+                .unwrap();
+                contents_list(&mut content, book, &headings, "");
+                content.push_str("</nav>\n");
+            }
             Block::Paragraph { html } => {
                 writeln!(content, "<p>{html}</p>").unwrap();
+            }
+            Block::Code { text, caption } => {
+                content.push_str("<figure>\n");
+                if !caption.is_empty() {
+                    writeln!(content, "<figcaption>{}</figcaption>", escape(caption)).unwrap();
+                }
+                writeln!(content, "<pre><code>{}</code></pre></figure>", escape(text)).unwrap();
             }
             Block::Figure {
                 media_type,
@@ -106,23 +121,33 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 )
                 .unwrap();
             }
-            Block::Formula { mathml, raw } => {
-                content.push_str("<div class=\"formula\">\n");
-                if !mathml.is_empty() {
-                    has_mathml = true;
-                    writeln!(content, "{mathml}").unwrap();
-                }
-                if !raw.is_empty() {
-                    writeln!(content, "<p class=\"formula-source\">{}</p>", escape(raw)).unwrap();
-                }
-                content.push_str("</div>\n");
+            Block::Formula { mathml } => {
+                has_mathml = true;
+                writeln!(content, "<div class=\"formula\">\n{mathml}\n</div>").unwrap();
             }
             Block::Table { rows } => {
                 content.push_str("<table><tbody>\n");
                 for row in rows {
                     content.push_str("<tr>");
                     for cell in row {
-                        write!(content, "<td>{}</td>", escape(cell)).unwrap();
+                        let tag = if cell.column_header || cell.row_header {
+                            "th"
+                        } else {
+                            "td"
+                        };
+                        write!(content, "<{tag}").unwrap();
+                        if cell.column_header && !cell.row_header {
+                            content.push_str(" scope=\"col\"");
+                        } else if cell.row_header && !cell.column_header {
+                            content.push_str(" scope=\"row\"");
+                        }
+                        if cell.rowspan > 1 {
+                            write!(content, " rowspan=\"{}\"", cell.rowspan).unwrap();
+                        }
+                        if cell.colspan > 1 {
+                            write!(content, " colspan=\"{}\"", cell.colspan).unwrap();
+                        }
+                        write!(content, ">{}</{tag}>", escape(&cell.text)).unwrap();
                     }
                     content.push_str("</tr>\n");
                 }
@@ -138,7 +163,7 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     zip.write_all(content.as_bytes())?;
 
     zip.start_file("EPUB/nav.xhtml", deflated)?;
-    zip.write_all(navigation(book, headings).as_bytes())?;
+    zip.write_all(navigation(book, &headings).as_bytes())?;
     zip.start_file("EPUB/book.opf", deflated)?;
     zip.write_all(package(book, &identifier(fingerprint), &image_manifest, has_mathml).as_bytes())?;
     zip.finish()?;
@@ -171,11 +196,27 @@ fn xhtml_start(title: &str, language: &str) -> String {
     )
 }
 
-fn navigation(book: &Book, headings: Vec<Heading<'_>>) -> String {
+fn navigation(book: &Book, headings: &[Heading<'_>]) -> String {
     let mut nav = xhtml_start(&book.title, &book.language);
     nav.push_str("<nav epub:type=\"toc\" id=\"toc\"><h1>Contents</h1>\n");
-    let headings = if book.navigation.is_empty() {
-        headings
+    contents_list(&mut nav, book, headings, CONTENT);
+    nav.push_str("</nav>\n</body></html>\n");
+    nav
+}
+
+fn navigation_headings(book: &Book) -> Vec<Heading<'_>> {
+    if book.navigation.is_empty() {
+        book.blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Heading { level, id, text } => Some(Heading {
+                    level: (*level).clamp(1, 6),
+                    id,
+                    title: text,
+                }),
+                _ => None,
+            })
+            .collect()
     } else {
         book.navigation
             .iter()
@@ -185,24 +226,26 @@ fn navigation(book: &Book, headings: Vec<Heading<'_>>) -> String {
                 title: &entry.text,
             })
             .collect()
-    };
+    }
+}
+
+fn contents_list(nav: &mut String, book: &Book, headings: &[Heading<'_>], path: &str) {
     if headings.is_empty() {
         writeln!(
             nav,
-            "<ol><li><a href=\"{CONTENT}\">{}</a></li></ol>",
+            "<ol><li><a href=\"{path}\">{}</a></li></ol>",
             escape(&book.title)
         )
         .unwrap();
     } else {
-        nav_list(&mut nav, &mut headings.into_iter().peekable(), 0);
+        nav_list(nav, &mut headings.iter().peekable(), path, 0);
     }
-    nav.push_str("</nav>\n</body></html>\n");
-    nav
 }
 
-fn nav_list<'a>(
+fn nav_list(
     nav: &mut String,
-    headings: &mut Peekable<impl Iterator<Item = Heading<'a>>>,
+    headings: &mut Peekable<std::slice::Iter<'_, Heading<'_>>>,
+    path: &str,
     parent_level: u8,
 ) {
     nav.push_str("<ol>\n");
@@ -213,7 +256,7 @@ fn nav_list<'a>(
         let heading = headings.next().expect("checked next heading");
         writeln!(
             nav,
-            "<li><a href=\"{CONTENT}#{}\">{}</a>",
+            "<li><a href=\"{path}#{}\">{}</a>",
             escape(heading.id),
             escape(heading.title)
         )
@@ -222,7 +265,7 @@ fn nav_list<'a>(
             .peek()
             .is_some_and(|next| next.level > heading.level)
         {
-            nav_list(nav, headings, heading.level);
+            nav_list(nav, headings, path, heading.level);
         }
         nav.push_str("</li>\n");
     }

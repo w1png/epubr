@@ -1,12 +1,19 @@
+mod code;
 mod math;
 mod notes;
+mod reflow;
+mod structure;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use lopdf::{Document, Object, decode_text_string};
 use serde_json::Value;
+
+pub(crate) use math::{SourceCrops, locate_placeholders};
+use reflow::clean_text;
+pub(crate) use structure::TableCell;
 
 pub(crate) struct Book {
     pub title: String,
@@ -24,6 +31,9 @@ pub(crate) struct NavEntry {
 }
 
 pub(crate) enum Block {
+    Contents {
+        title: String,
+    },
     Heading {
         level: u8,
         id: String,
@@ -43,19 +53,39 @@ pub(crate) enum Block {
     },
     Formula {
         mathml: String,
-        raw: String,
+    },
+    Code {
+        text: String,
+        caption: String,
     },
     Table {
-        rows: Vec<Vec<String>>,
+        rows: Vec<Vec<TableCell>>,
     },
 }
 
-pub(crate) fn normalize(
-    json: &str,
-    pdf: &Document,
-    input: &Path,
-) -> Result<Book, serde_json::Error> {
-    let doc: Value = serde_json::from_str(json)?;
+pub(crate) fn recover_source_regions(doc: &mut Value, pdf: &Document, input: &Path) {
+    let Some(texts) = doc["texts"].as_array_mut() else {
+        return;
+    };
+    let mut geometry = math::PageGeometry::new(pdf, input);
+    let mut code = code::SourceCode::new(input);
+    for item in texts {
+        let source = match label(item) {
+            "formula" => geometry.recover_formula(item),
+            "code" => code.recover(item),
+            _ => None,
+        };
+        if let Some(source) = source {
+            item["text"] = Value::String(source);
+            item["epubr_source_text"] = Value::Bool(true);
+            if label(item) == "formula" {
+                item["epubr_formula_undecoded"] = Value::Bool(false);
+            }
+        }
+    }
+}
+
+pub(crate) fn normalize(doc: &Value, pdf: &Document, input: &Path) -> Book {
     let info = pdf
         .trailer
         .get(b"Info")
@@ -93,13 +123,30 @@ pub(crate) fn normalize(
         navigation: Vec::new(),
         warnings: Vec::new(),
     };
-    let items = ordered_items(&doc);
+    let items = ordered_items(doc);
     let notes = notes::link_notes(&items, &mut book.warnings);
-    let mut geometry = math::PageGeometry::new(pdf);
+    let contents = structure::printed_contents(&items);
+    let figure_labels = structure::figure_labels(&items);
+    let reflow = reflow::Reflow::new(doc);
+    let mut geometry = math::PageGeometry::new(pdf, input);
     let mut crops = math::SourceCrops::new(input);
+    let mut source_code = code::SourceCode::new(input);
     let mut headings = Vec::new();
+    let mut previous_prose = None;
     for (index, item) in items.iter().enumerate() {
-        let text = item_text(item);
+        if matches!(label(item), "page_header" | "page_footer") {
+            continue;
+        }
+        let previous = previous_prose.take();
+        let text = reflow.text(item);
+        if contents.position(index) {
+            book.blocks.push(Block::Contents {
+                title: text.clone(),
+            });
+        }
+        if contents.contains(index) || figure_labels.contains(&index) {
+            continue;
+        }
         match label(item) {
             "section_header" | "title" if !text.is_empty() => {
                 let level = item["level"].as_u64().unwrap_or(1).clamp(1, 6) as u8;
@@ -108,7 +155,7 @@ pub(crate) fn normalize(
                 book.blocks.push(Block::Heading { level, id, text });
             }
             "picture" => {
-                let caption = caption(&doc, item);
+                let caption = caption(doc, item);
                 if let Some((media_type, data)) = embedded_image(&item["image"]) {
                     book.blocks.push(Block::Figure {
                         media_type,
@@ -124,10 +171,27 @@ pub(crate) fn normalize(
                 }
             }
             "table" => {
-                let caption = caption(&doc, item);
-                paragraph(&mut book.blocks, &caption);
-                if let Some(rows) = table_rows(item) {
+                let caption = caption(doc, item);
+                if let Some(rows) = structure::table_rows(item) {
+                    paragraph(&mut book.blocks, &caption);
                     book.blocks.push(Block::Table { rows });
+                } else if let Some((media_type, data)) = crops.crop(doc, item) {
+                    book.blocks.push(Block::Figure {
+                        media_type,
+                        data,
+                        caption,
+                    });
+                } else {
+                    book.warnings.push(format!(
+                        "Page {}: table layout could not be recovered",
+                        page_no(item)
+                    ));
+                    paragraph(&mut book.blocks, &caption);
+                    if let Some(cells) = item["data"]["table_cells"].as_array() {
+                        for cell in cells {
+                            paragraph(&mut book.blocks, &item_text(cell));
+                        }
+                    }
                 }
             }
             "footnote" if !text.is_empty() => {
@@ -141,15 +205,27 @@ pub(crate) fn normalize(
                 book.blocks.push(Block::Note { id, html });
             }
             "formula" => {
-                let raw = geometry.recover_overbar(item, &text).unwrap_or(text);
+                let raw = if math::placeholder(&text) || item["epubr_formula_undecoded"] == true {
+                    String::new()
+                } else {
+                    text
+                };
+                let raw = if item["epubr_source_text"] == true {
+                    raw
+                } else {
+                    geometry
+                        .recover_formula(item)
+                        .or_else(|| geometry.recover_overbar(item, &raw))
+                        .unwrap_or(raw)
+                };
                 if let Some(mathml) = math::presentation(&raw) {
-                    book.blocks.push(Block::Formula { mathml, raw });
+                    book.blocks.push(Block::Formula { mathml });
                 } else {
                     book.warnings.push(format!(
                         "Page {}: formula could not be represented as MathML",
                         page_no(item)
                     ));
-                    if let Some((media_type, data)) = crops.crop(&doc, item) {
+                    if let Some((media_type, data)) = crops.crop(doc, item) {
                         book.blocks.push(Block::Figure {
                             media_type,
                             data,
@@ -160,7 +236,35 @@ pub(crate) fn normalize(
                     }
                 }
             }
-            "page_header" | "page_footer" => {}
+            "code" => {
+                let caption = caption(doc, item);
+                let code = if item["epubr_source_text"] == true {
+                    item["text"].as_str().map(str::to_owned)
+                } else {
+                    source_code.recover(item).or_else(|| {
+                        (item["epubr_enriched"] == true || text.contains('\n'))
+                            .then(|| text.clone())
+                    })
+                };
+                if let Some(text) = code {
+                    book.blocks.push(Block::Code { text, caption });
+                } else if let Some((media_type, data)) = crops.crop(doc, item) {
+                    book.blocks.push(Block::Figure {
+                        media_type,
+                        data,
+                        caption,
+                    });
+                } else {
+                    paragraph(&mut book.blocks, &text);
+                    paragraph(&mut book.blocks, &caption);
+                }
+            }
+            _ if math::placeholder(&text) => {
+                book.warnings.push(format!(
+                    "Page {}: formula could not be located in the PDF",
+                    page_no(item)
+                ));
+            }
             _ if !text.is_empty() => {
                 if let Some(html) = notes.references.get(&index) {
                     book.blocks.push(Block::Paragraph {
@@ -169,19 +273,33 @@ pub(crate) fn normalize(
                 } else if math::standalone_equation(&text) {
                     let raw = geometry.recover_overbar(item, &text).unwrap_or(text);
                     if let Some(mathml) = math::presentation(&raw) {
-                        book.blocks.push(Block::Formula { mathml, raw });
+                        book.blocks.push(Block::Formula { mathml });
                     } else {
                         paragraph(&mut book.blocks, &raw);
                     }
                 } else {
-                    paragraph(&mut book.blocks, &text);
+                    let text = geometry.recover_inline(item, &text).unwrap_or(text);
+                    let html = escape_xml(&text);
+                    let joined = match previous.zip(book.blocks.last_mut()) {
+                        Some((previous, Block::Paragraph { html: prior })) => {
+                            reflow.join(doc, previous, item, prior, &html)
+                        }
+                        _ => false,
+                    };
+                    if !joined {
+                        book.blocks.push(Block::Paragraph { html });
+                    }
+                    previous_prose = Some(*item);
                 }
             }
             _ => {}
         }
     }
-    book.navigation = outline_navigation(pdf, &book.blocks, &headings);
-    Ok(book)
+    book.navigation = contents.navigation(&book.blocks, &headings);
+    if book.navigation.is_empty() {
+        book.navigation = outline_navigation(pdf, &book.blocks, &headings);
+    }
+    book
 }
 
 fn paragraph(blocks: &mut Vec<Block>, text: &str) {
@@ -313,47 +431,6 @@ fn embedded_image(value: &Value) -> Option<(String, Vec<u8>)> {
     }
     let bytes = STANDARD.decode(encoded).ok()?;
     (!bytes.is_empty()).then(|| (format.to_owned(), bytes))
-}
-
-fn table_rows(item: &Value) -> Option<Vec<Vec<String>>> {
-    let data = &item["data"];
-    let mut cells: HashMap<(usize, usize), String> = HashMap::new();
-    for cell in data["table_cells"].as_array()? {
-        let (Some(row), Some(column)) = (
-            cell["start_row_offset_idx"].as_u64(),
-            cell["start_col_offset_idx"].as_u64(),
-        ) else {
-            continue;
-        };
-        let row = usize::try_from(row).ok()?;
-        let column = usize::try_from(column).ok()?;
-        cells.insert((row, column), item_text(cell));
-    }
-    let rows = cells.keys().map(|(row, _)| *row).max()?.checked_add(1)?;
-    let columns = cells
-        .keys()
-        .map(|(_, column)| *column)
-        .max()?
-        .checked_add(1)?;
-    // Keep a damaged table graph from allocating an unbounded dense grid.
-    if rows.checked_mul(columns)? > 100_000 {
-        return None;
-    }
-    Some(
-        (0..rows)
-            .map(|row| {
-                (0..columns)
-                    .map(|column| cells.remove(&(row, column)).unwrap_or_default())
-                    .collect()
-            })
-            .collect(),
-    )
-}
-
-fn clean_text(text: &str) -> String {
-    text.trim().chars().filter(|&c| {
-        matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
-    }).collect()
 }
 
 fn escape_xml(text: &str) -> String {

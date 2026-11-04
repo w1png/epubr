@@ -53,6 +53,10 @@ pub enum Progress {
         page: usize,
         success: bool,
     },
+    Enrichment {
+        completed: usize,
+        total: usize,
+    },
     Finished,
 }
 

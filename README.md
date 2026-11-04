@@ -8,14 +8,16 @@ when conversion succeeds. Press Ctrl-C to cancel.
 
 ```sh
 just release
-./target/release/epubr convert raw/hard.pdf -o hard.epub --model standard --mode text
+./target/release/epubr convert raw/hard.pdf -o hard.epub --model technical
 ```
 
 - `--mode auto` uses OCR as needed, `--mode text` uses the PDF's text layer,
   and `--mode scan` forces OCR. Use `--pages 24-30` for an inclusive range.
 - `--model standard` selects layout, tables, and multilingual OCR (about 295 MiB).
-  `--model technical` adds formula enrichment (about 1.01 GiB total) and is the
-  default. Both profiles share cached assets.
+  `--model technical` adds code and formula enrichment (about 1.01 GiB total) and is the
+  default. Both profiles share cached assets. Technical conversion reports
+  extraction and decoding separately. If decoding exceeds its time budget,
+  Epubr preserves the affected region as a source crop where available.
 - `--models DIR` uses a preinstalled directory containing the pinned
   `.models/` assets. Epubr verifies this directory and reports missing or
   invalid assets. With no override, it uses the OS user cache (on Linux,

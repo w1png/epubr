@@ -164,8 +164,9 @@ fn convert_inner(
     };
     cancellation.check()?;
     on_progress(Progress::Started);
-    let extracted = extract_for_conversion(
+    let (document, mut warnings) = extract_for_conversion(
         input,
+        &pdf,
         ExtractionOptions {
             mode: options.mode,
             pages: options.pages,
@@ -176,8 +177,7 @@ fn convert_inner(
         &on_progress,
     )?;
     cancellation.check()?;
-    let book =
-        crate::book::normalize(&extracted.json, &pdf, input).map_err(ConversionError::Document)?;
+    let book = crate::book::normalize(&document, &pdf, input);
     if book.blocks.is_empty() {
         return Err(ConversionError::NoContent);
     }
@@ -199,9 +199,8 @@ fn convert_inner(
         }
     })?;
     on_progress(Progress::Finished);
-    Ok(ConversionReport {
-        warnings: book.warnings,
-    })
+    warnings.extend(book.warnings);
+    Ok(ConversionReport { warnings })
 }
 
 fn read_pdf(input: &Path) -> Result<lopdf::Document, ConversionError> {

@@ -1,3 +1,5 @@
+mod enrichment;
+
 use std::env;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,10 +9,11 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     CancellationToken, ConversionError, Extracted, ExtractionError, ExtractionOptions, ModelConfig,
-    ModelError, OcrMode, Progress, extract_profile,
+    ModelError, ModelProfile, OcrMode, Progress, extract_profile,
 };
 
 const WORKER_NAME: &str = "epubr-extract-worker";
@@ -39,12 +42,13 @@ enum WorkerMessage {
 
 pub(crate) fn extract_for_conversion(
     input: &Path,
+    pdf: &lopdf::Document,
     options: ExtractionOptions,
     models: &ModelConfig,
     worker: Option<&Path>,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
-) -> Result<Extracted, ConversionError> {
+) -> Result<(Value, Vec<String>), ConversionError> {
     let input = input.canonicalize().map_err(ConversionError::Io)?;
     let worker = match worker {
         Some(path) => path.canonicalize()?,
@@ -56,7 +60,7 @@ pub(crate) fn extract_for_conversion(
             ModelError::Cancelled => ConversionError::Cancelled,
             error => ConversionError::Models(error),
         })?;
-    let mut command = Command::new(worker);
+    let mut command = Command::new(&worker);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -70,8 +74,7 @@ pub(crate) fn extract_for_conversion(
     };
     command
         .arg(EXTRACTION_WORKER_FLAG)
-        .arg(input)
-        .arg(models.profile.to_string())
+        .arg(&input)
         .arg(mode)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
@@ -81,7 +84,24 @@ pub(crate) fn extract_for_conversion(
     prepared.configure_command(&mut command);
 
     cancellation.check()?;
-    receive_progress(&mut command, cancellation, on_progress)
+    let extracted = receive_progress(&mut command, cancellation, &on_progress)?;
+    let mut document: Value =
+        serde_json::from_str(&extracted.json).map_err(ConversionError::Document)?;
+    crate::book::locate_placeholders(&mut document, &input);
+    let warnings = if models.profile == ModelProfile::Technical {
+        crate::book::recover_source_regions(&mut document, pdf, &input);
+        enrichment::enrich(
+            &mut document,
+            &input,
+            &worker,
+            &prepared,
+            cancellation,
+            on_progress,
+        )?
+    } else {
+        Vec::new()
+    };
+    Ok((document, warnings))
 }
 
 fn worker_path() -> Result<PathBuf, ConversionError> {
@@ -223,11 +243,9 @@ fn worker_main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("invalid extraction worker invocation".into());
     }
     let input = args.next().ok_or("missing worker input")?;
-    let profile = args
-        .next()
-        .and_then(|value| value.into_string().ok())
-        .ok_or("missing worker model profile")?
-        .parse()?;
+    if input == enrichment::FLAG {
+        return enrichment::worker_main(&args.next().ok_or("missing enrichment input")?);
+    }
     let mode = match args.next().as_ref().and_then(|value| value.to_str()) {
         Some("auto") => OcrMode::Auto,
         Some("text") => OcrMode::Text,
@@ -253,7 +271,7 @@ fn worker_main() -> Result<(), Box<dyn std::error::Error>> {
     let extracted = extract_profile(
         Path::new(&input),
         ExtractionOptions { mode, pages },
-        profile,
+        ModelProfile::Standard,
         |progress| {
             if let Progress::Page {
                 completed,
