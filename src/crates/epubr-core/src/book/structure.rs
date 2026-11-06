@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::Path;
 
 use docling_pdf::textparse::PageTextParser;
-use lopdf::{Document, ObjectId, Outline, TocType, decode_text_string};
+use lopdf::{Dictionary, Document, Object, ObjectId, Outline, TocType, decode_text_string};
 use serde_json::Value;
 
 use super::{Block, NavEntry, clean_text, get_ref, item_text, label, page_no, resolve};
@@ -147,6 +148,7 @@ pub(super) struct PrintedContents {
     marker: Option<usize>,
     entries: Vec<PrintedEntry>,
     outline: Vec<TocType>,
+    linked_entries: Option<HashSet<usize>>,
 }
 
 #[derive(Default)]
@@ -175,10 +177,25 @@ impl PrintedContents {
         blocks: &mut Vec<Block>,
         headings: &[(u64, usize)],
         page_starts: &HashMap<u64, usize>,
-    ) -> Vec<NavEntry> {
-        if !self.outline.is_empty() {
-            return bookmark_navigation(&self.outline, blocks, headings, page_starts);
+    ) -> (Vec<NavEntry>, Option<Vec<NavEntry>>) {
+        if self.outline.is_empty() {
+            return (self.printed_navigation(blocks, headings), None);
         }
+        let entries = bookmark_navigation(&self.outline, blocks, headings, page_starts);
+        let in_book = self.linked_entries.as_ref().map(|linked| {
+            entries
+                .iter()
+                .filter(|(index, _)| linked.contains(index))
+                .map(|(_, entry)| entry.clone())
+                .collect()
+        });
+        (
+            entries.into_iter().map(|(_, entry)| entry).collect(),
+            in_book,
+        )
+    }
+
+    fn printed_navigation(&self, blocks: &[Block], headings: &[(u64, usize)]) -> Vec<NavEntry> {
         let mut by_title = HashMap::<_, Vec<_>>::new();
         for &(page, index) in headings {
             if let Block::Heading { level, id, text } = &blocks[index] {
@@ -271,6 +288,7 @@ pub(super) fn printed_contents(items: &[&Value], pdf: &Document, input: &Path) -
         marker,
         entries,
         outline: Vec::new(),
+        linked_entries: None,
     }
 }
 
@@ -299,7 +317,7 @@ fn contents_from_bookmarks(
         })?;
         (first, end)
     };
-    if first > 40 || !(2..=16).contains(&(end - first)) {
+    if first > 40 || !(1..=16).contains(&(end - first)) {
         return None;
     }
     let pages = first as u64..end as u64;
@@ -317,6 +335,16 @@ fn contents_from_bookmarks(
                 )
         })
         .unwrap_or(first_title);
+    if let Some((hidden, linked_entries)) = linked_contents(items, pdf, pages.clone(), marker, &toc)
+    {
+        return Some(PrintedContents {
+            hidden,
+            marker: Some(marker),
+            entries: Vec::new(),
+            outline: toc,
+            linked_entries: Some(linked_entries),
+        });
+    }
     let outline: Vec<_> = toc.into_iter().filter(|entry| entry.page >= end).collect();
     if outline.len() < 4
         || !items.iter().any(|item| {
@@ -364,7 +392,134 @@ fn contents_from_bookmarks(
         marker: Some(marker),
         entries: Vec::new(),
         outline,
+        linked_entries: None,
     })
+}
+
+fn linked_contents(
+    items: &[&Value],
+    pdf: &Document,
+    pages: Range<u64>,
+    marker: usize,
+    outline: &[TocType],
+) -> Option<(HashSet<usize>, HashSet<usize>)> {
+    let pdf_pages = pdf.get_pages();
+    let destinations: HashMap<_, _> = outline
+        .iter()
+        .filter_map(|entry| {
+            let page = u32::try_from(entry.page).ok()?;
+            (u64::from(page) >= pages.end).then_some(())?;
+            Some((*pdf_pages.get(&page)?, entry.page))
+        })
+        .collect();
+    let links = pages
+        .clone()
+        .map(|page| {
+            let id = *pdf_pages.get(&u32::try_from(page).ok()?)?;
+            Some(linked_pages(pdf, id, &destinations))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let linked_pages: HashSet<_> = links.iter().flatten().copied().collect();
+    let entries: Vec<_> = outline
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| linked_pages.contains(&entry.page))
+        .map(|(index, entry)| (index, entry.page, title_key(&entry.title)))
+        .collect();
+    if entries.len() < 4
+        || !items.iter().any(|item| {
+            !matches!(label(item), "page_header" | "page_footer")
+                && usize::try_from(page_no(item)).is_ok_and(|page| linked_pages.contains(&page))
+        })
+    {
+        return None;
+    }
+
+    // Replace only complete blocks accounted for by the linked bookmark titles.
+    // Other material on the same page remains in the book.
+    let mut hidden = HashSet::from([marker]);
+    let mut remaining = entries.as_slice();
+    for (page, mut targets) in pages.zip(links) {
+        let (mut expected, rest) = remaining.split_at_checked(targets.len())?;
+        let mut expected_pages: Vec<_> = expected.iter().map(|(_, page, _)| *page).collect();
+        targets.sort_unstable();
+        expected_pages.sort_unstable();
+        if targets != expected_pages || expected.is_empty() {
+            return None;
+        }
+        for (index, item) in items.iter().enumerate().filter(|(index, item)| {
+            *index != marker
+                && page_no(item) == page
+                && matches!(
+                    label(item),
+                    "text" | "paragraph" | "list_item" | "section_header" | "title"
+                )
+        }) {
+            let key = title_key(&item_text(item));
+            if let Some(count) = matching_titles(&key, expected) {
+                hidden.insert(index);
+                expected = &expected[count..];
+            }
+        }
+        if !expected.is_empty() {
+            return None;
+        }
+        remaining = rest;
+    }
+    remaining.is_empty().then(|| {
+        (
+            hidden,
+            entries.into_iter().map(|(index, _, _)| index).collect(),
+        )
+    })
+}
+
+fn matching_titles(mut text: &str, entries: &[(usize, usize, String)]) -> Option<usize> {
+    for (index, (_, _, title)) in entries.iter().enumerate() {
+        if title.is_empty() {
+            return None;
+        }
+        text = text.strip_prefix(title)?;
+        if text.is_empty() {
+            return Some(index + 1);
+        }
+    }
+    None
+}
+
+fn linked_pages(
+    pdf: &Document,
+    page: ObjectId,
+    destinations: &HashMap<ObjectId, usize>,
+) -> Vec<usize> {
+    let mut seen = Vec::new();
+    pdf.get_page_annotations(page)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|annotation| {
+            let destination = link_destination(pdf, annotation)?;
+            let page = destinations.get(&destination.first()?.as_reference().ok()?)?;
+            if seen.contains(&destination) {
+                return None;
+            }
+            seen.push(destination);
+            Some(*page)
+        })
+        .collect()
+}
+
+fn link_destination<'a>(pdf: &'a Document, annotation: &'a Dictionary) -> Option<&'a [Object]> {
+    if annotation.get(b"Subtype").ok()?.as_name().ok()? != b"Link" {
+        return None;
+    }
+    let destination = if let Ok(destination) = annotation.get(b"Dest") {
+        destination
+    } else {
+        let action = pdf.get_dict_in_dict(annotation, b"A").ok()?;
+        (action.get(b"S").ok()?.as_name().ok()? == b"GoTo").then_some(())?;
+        action.get(b"D").ok()?
+    };
+    Some(resolve(pdf, destination).as_array().ok()?)
 }
 
 fn bookmark_navigation(
@@ -372,11 +527,12 @@ fn bookmark_navigation(
     blocks: &mut Vec<Block>,
     headings: &[(u64, usize)],
     page_starts: &HashMap<u64, usize>,
-) -> Vec<NavEntry> {
+) -> Vec<(usize, NavEntry)> {
     let mut anchors = HashSet::new();
     let entries = outline
         .iter()
-        .filter_map(|entry| {
+        .enumerate()
+        .filter_map(|(index, entry)| {
             let page = entry.page as u64;
             let block = *page_starts.get(&page)?;
             let key = title_key(&entry.title);
@@ -418,11 +574,14 @@ fn bookmark_navigation(
                 },
                 |(_, id)| id.clone(),
             );
-            Some(NavEntry {
-                level: entry.level.clamp(1, 6) as u8,
-                id,
-                text: super::clean_text(&entry.title),
-            })
+            Some((
+                index,
+                NavEntry {
+                    level: entry.level.clamp(1, 6) as u8,
+                    id,
+                    text: super::clean_text(&entry.title),
+                },
+            ))
         })
         .collect();
     let mut anchors: Vec<_> = anchors.into_iter().collect();
@@ -666,6 +825,118 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recognizes_linked_contents_and_preserves_neighboring_text() {
+        use lopdf::{Bookmark, Object, dictionary};
+
+        let mut pdf = Document::new();
+        let page_tree = pdf.new_object_id();
+        let pages: Vec<_> = (0..5)
+            .map(|_| pdf.add_object(dictionary! { "Type" => "Page", "Parent" => page_tree }))
+            .collect();
+        pdf.set_object(
+            page_tree,
+            dictionary! {
+                "Type" => "Pages", "Kids" => pages.iter().copied().map(Object::from).collect::<Vec<_>>(),
+                "Count" => 5_i64, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            },
+        );
+        let chapters = [
+            "First chapter",
+            "Second chapter",
+            "Third chapter",
+            "Fourth chapter",
+        ];
+        for (page, title) in [(0, "Preface"), (1, "Contents"), (2, "Epigraph")]
+            .into_iter()
+            .chain(
+                chapters
+                    .into_iter()
+                    .zip([3, 3, 4, 4])
+                    .map(|(title, page)| (page, title)),
+            )
+        {
+            pdf.add_bookmark(Bookmark::new(title.into(), [0.0; 3], 0, pages[page]), None);
+        }
+        let outlines = pdf.build_outline().unwrap();
+        let catalog = pdf.add_object(
+            dictionary! { "Type" => "Catalog", "Pages" => page_tree, "Outlines" => outlines },
+        );
+        pdf.trailer.set("Root", catalog);
+        let links = [3, 3, 4, 4]
+            .into_iter()
+            .zip([700_i64, 500, 700, 500])
+            .map(|(page, top)| {
+                let destination = vec![
+                    pages[page].into(),
+                    Object::Name(b"XYZ".to_vec()),
+                    0.into(),
+                    top.into(),
+                    Object::Null,
+                ];
+                if page == 3 {
+                    dictionary! { "Subtype" => "Link", "Dest" => destination }.into()
+                } else {
+                    let action = dictionary! { "S" => "GoTo", "D" => destination };
+                    dictionary! { "Subtype" => "Link", "A" => action }.into()
+                }
+            })
+            .collect::<Vec<Object>>();
+        pdf.get_object_mut(pages[1])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Annots", links);
+
+        let item =
+            |page, label, text| json!({"label": label, "text": text, "prov": [{"page_no": page} ]});
+        let texts = [
+            item(1, "text", "Preface prose"),
+            item(2, "section_header", "Contents"),
+            item(
+                2,
+                "text",
+                "First chapter Second chapter Third chapter Fourth chapter",
+            ),
+            item(2, "text", "A notice below the list."),
+            item(3, "text", "Epigraph prose"),
+            item(4, "section_header", chapters[0]),
+            item(4, "section_header", chapters[1]),
+            item(5, "section_header", chapters[2]),
+            item(5, "section_header", chapters[3]),
+        ];
+        let children: Vec<_> = (0..texts.len())
+            .map(|i| json!({"$ref": format!("#/texts/{i}")}))
+            .collect();
+        let mut doc = json!({"body": {"children": children}, "texts": texts});
+        let normalize = |doc: &Value| {
+            super::super::normalize(doc, &pdf, Path::new("missing.pdf"), Default::default())
+        };
+        let book = normalize(&doc);
+        let reader = &book.navigation;
+        let printed = book.contents_navigation.unwrap();
+        assert_eq!(reader.len(), 7);
+        assert_eq!(reader[1].id, "source-page-2");
+        assert!(book.blocks.windows(3).any(|blocks| matches!(
+            blocks,
+            [Block::PageAnchor { page: 2 }, Block::Contents { title }, Block::Paragraph { html }]
+                if title == "Contents" && html == "A notice below the list."
+        )));
+        assert_eq!(
+            printed
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            chapters
+        );
+        assert_ne!(printed[0].id, printed[1].id);
+
+        doc["texts"][2]["text"] = json!(
+            "First chapter Second chapter Third chapter Fourth chapter A notice below the list."
+        );
+        assert!(normalize(&doc).contents_navigation.is_none());
+    }
+
+    #[test]
     fn decodes_pdf_bookmark_titles_at_each_depth() {
         use lopdf::{Destination, Object, StringFormat};
 
@@ -732,7 +1003,7 @@ mod tests {
         assert_eq!(
             entries
                 .iter()
-                .map(|entry| (entry.level, entry.id.as_str()))
+                .map(|(_, entry)| (entry.level, entry.id.as_str()))
                 .collect::<Vec<_>>(),
             [(1, "first"), (2, "details"), (2, "source-page-12")]
         );
