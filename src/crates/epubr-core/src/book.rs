@@ -35,9 +35,11 @@ pub(crate) struct Book {
     pub description: Option<String>,
     pub blocks: Vec<Block>,
     pub navigation: Vec<NavEntry>,
+    pub contents_navigation: Option<Vec<NavEntry>>,
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct NavEntry {
     pub level: u8,
     pub id: String,
@@ -148,6 +150,7 @@ pub(crate) fn normalize(
         description: overrides.description,
         blocks: Vec::new(),
         navigation: Vec::new(),
+        contents_navigation: None,
         warnings: Vec::new(),
     };
     let mut items = ordered_items(doc);
@@ -177,7 +180,9 @@ pub(crate) fn normalize(
         }
         let previous = previous_prose.take();
         let previous_list = list_run.take();
+        let page = page_no(item);
         if contents.position(index) {
+            page_starts.entry(page).or_insert(book.blocks.len());
             book.blocks.push(Block::Contents {
                 title: text.clone(),
             });
@@ -185,7 +190,6 @@ pub(crate) fn normalize(
         if contents.contains(index) || figure_labels.contains(&index) {
             continue;
         }
-        let page = page_no(item);
         if page > 0 {
             page_starts.entry(page).or_insert(book.blocks.len());
         }
@@ -381,7 +385,8 @@ pub(crate) fn normalize(
             _ => {}
         }
     }
-    book.navigation = contents.navigation(&mut book.blocks, &headings, &page_starts);
+    (book.navigation, book.contents_navigation) =
+        contents.navigation(&mut book.blocks, &headings, &page_starts);
     if book.navigation.is_empty() {
         book.navigation = outline_navigation(pdf, &book.blocks, &headings);
     }

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::book::{Block, Book};
+use crate::book::{Block, Book, NavEntry};
 
 const CONTAINER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -51,6 +51,7 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
 
     let mut content = xhtml_start(&book.title, &book.language);
     let headings = navigation_headings(book);
+    let contents_headings = book.contents_navigation.as_deref().map(entry_headings);
     let mut image_manifest = String::new();
     let mut image_count = 0;
     let mut has_mathml = false;
@@ -97,7 +98,12 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                     escape(title)
                 )
                 .unwrap();
-                contents_list(&mut content, book, &headings, "");
+                contents_list(
+                    &mut content,
+                    book,
+                    contents_headings.as_deref().unwrap_or(&headings),
+                    "",
+                );
                 content.push_str("</nav>\n");
             }
             Block::Paragraph { html } => {
@@ -264,15 +270,19 @@ fn navigation_headings(book: &Book) -> Vec<Heading<'_>> {
             })
             .collect()
     } else {
-        book.navigation
-            .iter()
-            .map(|entry| Heading {
-                level: entry.level.clamp(1, 6),
-                id: &entry.id,
-                title: &entry.text,
-            })
-            .collect()
+        entry_headings(&book.navigation)
     }
+}
+
+fn entry_headings(entries: &[NavEntry]) -> Vec<Heading<'_>> {
+    entries
+        .iter()
+        .map(|entry| Heading {
+            level: entry.level.clamp(1, 6),
+            id: &entry.id,
+            title: &entry.text,
+        })
+        .collect()
 }
 
 fn contents_list(nav: &mut String, book: &Book, headings: &[Heading<'_>], path: &str) {
