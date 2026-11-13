@@ -10,6 +10,7 @@ mod structure;
 mod superscripts;
 mod symbols;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -17,7 +18,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use lopdf::{Document, Object};
 use serde_json::Value;
 
-use crate::MetadataOverrides;
+use crate::{MathMlMode, MetadataOverrides};
 
 pub(crate) use math::{SourceCrops, locate_placeholders};
 use reflow::clean_text;
@@ -47,9 +48,26 @@ pub(crate) struct NavEntry {
 }
 
 pub(crate) struct ListItem {
-    pub html: String,
-    pub has_mathml: bool,
+    pub content: ListItemContent,
     pub number: Option<u64>,
+}
+
+pub(crate) enum ListItemContent {
+    Html(String),
+    Formula(Formula),
+}
+
+pub(crate) struct SourceImage {
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+pub(crate) enum Formula {
+    MathMl {
+        markup: String,
+        fallback: Option<SourceImage>,
+    },
+    Image(SourceImage),
 }
 
 pub(crate) enum Block {
@@ -80,13 +98,7 @@ pub(crate) enum Block {
         id: String,
         html: String,
     },
-    Formula {
-        mathml: String,
-    },
-    FormulaImage {
-        media_type: String,
-        data: Vec<u8>,
-    },
+    Formula(Formula),
     Code {
         text: String,
         caption: String,
@@ -96,7 +108,12 @@ pub(crate) enum Block {
     },
 }
 
-pub(crate) fn recover_source_regions(doc: &mut Value, pdf: &Document, input: &Path) {
+pub(crate) fn recover_source_regions(
+    doc: &mut Value,
+    pdf: &Document,
+    input: &Path,
+    decode_formulas: bool,
+) {
     let Some(texts) = doc["texts"].as_array_mut() else {
         return;
     };
@@ -104,7 +121,7 @@ pub(crate) fn recover_source_regions(doc: &mut Value, pdf: &Document, input: &Pa
     let mut code = code::SourceCode::new(input);
     for item in texts {
         let source = match label(item) {
-            "formula" => geometry.recover_formula(item),
+            "formula" if decode_formulas => geometry.recover_formula(item),
             "code" => code.recover(item),
             _ => None,
         };
@@ -129,6 +146,7 @@ pub(crate) fn normalize(
     pdf: &Document,
     input: &Path,
     mut overrides: MetadataOverrides,
+    math_ml: MathMlMode,
 ) -> Book {
     let inferred = metadata::infer(pdf, input);
     let cover = cover::render(
@@ -252,41 +270,24 @@ pub(crate) fn normalize(
                 previous_prose = previous.filter(|(prose, _)| page_no(prose) == page_no(item));
             }
             "formula" => {
-                let raw = if math::placeholder(&text) || item["epubr_formula_undecoded"] == true {
-                    String::new()
-                } else {
-                    text
-                };
-                let raw = if item["epubr_source_text"] == true {
-                    raw
-                } else if item["epubr_enriched"] == true {
-                    math::compact_decoded_numbers(&raw)
-                } else {
-                    geometry
-                        .recover_formula(item)
-                        .or_else(|| geometry.recover_overbar(item, &raw))
-                        .unwrap_or(raw)
-                };
-                if let Some(mathml) = math::presentation(&raw)
-                    && (item["epubr_enriched"] != true
-                        || item["epubr_formula_source_ink"]
-                            .as_str()
-                            .is_none_or(|source| math::consistent_with_source(&mathml, source)))
-                {
-                    book.blocks.push(Block::Formula { mathml });
-                } else {
+                let markup = (math_ml != MathMlMode::Disable)
+                    .then(|| formula_mathml(item, &text, &mut geometry))
+                    .flatten();
+                if math_ml != MathMlMode::Disable && markup.is_none() {
                     book.warnings.push(format!(
                         "Page {}: formula could not be represented as MathML",
-                        page_no(item)
+                        page
                     ));
-                    if let Some((media_type, data)) = crops.crop(doc, item) {
-                        book.blocks.push(Block::FormulaImage { media_type, data });
-                    } else {
-                        book.warnings.push(format!(
-                            "Page {}: no source crop is available for the formula",
-                            page_no(item)
-                        ));
-                    }
+                }
+                if let Some(formula) = formula_with_image(math_ml, markup, true, || {
+                    formula_image(&mut crops, doc, item, &mut book.warnings)
+                }) {
+                    book.blocks.push(Block::Formula(formula));
+                } else if math_ml == MathMlMode::Disable
+                    && !math::placeholder(&text)
+                    && item["epubr_formula_undecoded"] != true
+                {
+                    paragraph(&mut book.blocks, &text);
                 }
             }
             "code" => {
@@ -331,19 +332,28 @@ pub(crate) fn normalize(
                 });
                 let group = (item["parent"]["$ref"].as_str(), ordered);
                 let reference = notes.references.get(&index);
-                let mathml = if reference.is_none() && math::standalone_equation(&text) {
-                    let raw = geometry.recover_overbar(item, &text);
-                    math::presentation(
-                        &superscripts.expression(item, raw.as_deref().unwrap_or(&text)),
-                    )
+                let formula = if reference.is_none() && math::standalone_equation(&text) {
+                    let (_, markup) =
+                        standalone_mathml(math_ml, item, &text, &mut geometry, &mut superscripts);
+                    formula_with_image(math_ml, markup, false, || {
+                        formula_image(&mut crops, doc, item, &mut book.warnings)
+                    })
                 } else {
                     None
                 };
                 let entry = ListItem {
-                    has_mathml: mathml.is_some(),
-                    html: mathml.unwrap_or_else(|| {
-                        prose_html(item, text, reference, &mut geometry, &mut superscripts)
-                    }),
+                    content: formula.map_or_else(
+                        || {
+                            ListItemContent::Html(prose_html(
+                                item,
+                                text,
+                                reference,
+                                &mut geometry,
+                                &mut superscripts,
+                            ))
+                        },
+                        ListItemContent::Formula,
+                    ),
                     number,
                 };
                 if previous_list == Some(group)
@@ -361,9 +371,12 @@ pub(crate) fn normalize(
             _ if !text.is_empty() => {
                 let reference = notes.references.get(&index);
                 if reference.is_none() && math::standalone_equation(&text) {
-                    let raw = geometry.recover_overbar(item, &text).unwrap_or(text);
-                    if let Some(mathml) = math::presentation(&superscripts.expression(item, &raw)) {
-                        book.blocks.push(Block::Formula { mathml });
+                    let (raw, markup) =
+                        standalone_mathml(math_ml, item, &text, &mut geometry, &mut superscripts);
+                    if let Some(formula) = formula_with_image(math_ml, markup, false, || {
+                        formula_image(&mut crops, doc, item, &mut book.warnings)
+                    }) {
+                        book.blocks.push(Block::Formula(formula));
                     } else {
                         book.blocks.push(Block::Paragraph {
                             html: superscripts.html(item, &raw),
@@ -391,6 +404,83 @@ pub(crate) fn normalize(
         book.navigation = outline_navigation(pdf, &book.blocks, &headings);
     }
     book
+}
+
+fn formula_mathml(
+    item: &Value,
+    text: &str,
+    geometry: &mut math::PageGeometry<'_>,
+) -> Option<String> {
+    let raw = if math::placeholder(text) || item["epubr_formula_undecoded"] == true {
+        ""
+    } else {
+        text
+    };
+    let raw = if item["epubr_source_text"] == true {
+        Cow::Borrowed(raw)
+    } else if item["epubr_enriched"] == true {
+        Cow::Owned(math::compact_decoded_numbers(raw))
+    } else {
+        geometry
+            .recover_formula(item)
+            .or_else(|| geometry.recover_overbar(item, raw))
+            .map_or(Cow::Borrowed(raw), Cow::Owned)
+    };
+    math::presentation(&raw).filter(|markup| {
+        item["epubr_enriched"] != true
+            || item["epubr_formula_source_ink"]
+                .as_str()
+                .is_none_or(|source| math::consistent_with_source(markup, source))
+    })
+}
+
+fn standalone_mathml<'a>(
+    mode: MathMlMode,
+    item: &Value,
+    text: &'a str,
+    geometry: &mut math::PageGeometry<'_>,
+    superscripts: &mut superscripts::Superscripts<'_>,
+) -> (Cow<'a, str>, Option<String>) {
+    if mode == MathMlMode::Disable {
+        return (Cow::Borrowed(text), None);
+    }
+    let raw = geometry
+        .recover_overbar(item, text)
+        .map_or(Cow::Borrowed(text), Cow::Owned);
+    let markup = math::presentation(&superscripts.expression(item, &raw));
+    (raw, markup)
+}
+
+fn formula_with_image(
+    mode: MathMlMode,
+    markup: Option<String>,
+    image_when_undecodable: bool,
+    image: impl FnOnce() -> Option<SourceImage>,
+) -> Option<Formula> {
+    match markup {
+        Some(markup) => Some(Formula::MathMl {
+            markup,
+            fallback: (mode == MathMlMode::Fallback).then(image).flatten(),
+        }),
+        None if image_when_undecodable || mode != MathMlMode::Enable => image().map(Formula::Image),
+        None => None,
+    }
+}
+
+fn formula_image(
+    crops: &mut SourceCrops<'_>,
+    doc: &Value,
+    item: &Value,
+    warnings: &mut Vec<String>,
+) -> Option<SourceImage> {
+    if let Some((media_type, data)) = crops.crop(doc, item) {
+        return Some(SourceImage { media_type, data });
+    }
+    warnings.push(format!(
+        "Page {}: no source crop is available for the formula",
+        page_no(item)
+    ));
+    None
 }
 
 fn prose_html(
@@ -563,6 +653,7 @@ mod tests {
             &Document::new(),
             Path::new("source.pdf"),
             MetadataOverrides::default(),
+            MathMlMode::default(),
         );
         let [Block::Paragraph { html }, Block::Note { id, html: note }] = book.blocks.as_slice()
         else {

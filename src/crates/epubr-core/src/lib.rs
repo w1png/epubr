@@ -9,7 +9,7 @@ mod models;
 #[doc(hidden)]
 pub use book::is_language_tag;
 pub use conversion::{
-    CancellationToken, ConversionError, ConversionOptions, ConversionReport, convert,
+    CancellationToken, ConversionError, ConversionOptions, ConversionReport, MathMlMode, convert,
     convert_with_models, convert_with_worker,
 };
 #[doc(hidden)]

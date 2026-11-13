@@ -7,13 +7,22 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::extraction::{ExtractionWorker, extract_for_conversion};
-use crate::{ExtractionError, ExtractionOptions, ModelConfig, ModelError, OcrMode, Progress};
+use crate::{ExtractionError, ModelConfig, ModelError, OcrMode, Progress};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ConversionOptions {
     pub mode: OcrMode,
     /// Inclusive, one-based source page range. Defaults to the full document.
     pub pages: Option<(usize, usize)>,
+}
+
+/// Controls how detected formulas are represented in the EPUB.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MathMlMode {
+    #[default]
+    Enable,
+    Disable,
+    Fallback,
 }
 
 /// Explicit metadata for the generated EPUB. Omitted fields are inferred.
@@ -34,6 +43,7 @@ pub struct MetadataOverrides {
 pub struct ConversionSettings {
     pub options: ConversionOptions,
     pub metadata: MetadataOverrides,
+    pub math_ml: MathMlMode,
 }
 
 #[derive(Debug, Default)]
@@ -210,7 +220,7 @@ fn convert_inner(
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {
-    let ConversionSettings { options, metadata } = settings;
+    let options = settings.options;
     cancellation.check()?;
     match output.symlink_metadata() {
         Ok(_) => return Err(ConversionError::DestinationExists),
@@ -242,17 +252,14 @@ fn convert_inner(
     let (document, mut warnings) = extract_for_conversion(
         input,
         &pdf,
-        ExtractionOptions {
-            mode: options.mode,
-            pages: options.pages,
-        },
+        &settings,
         models,
         worker,
         cancellation,
         &on_progress,
     )?;
     cancellation.check()?;
-    let book = crate::book::normalize(&document, &pdf, input, metadata);
+    let book = crate::book::normalize(&document, &pdf, input, settings.metadata, settings.math_ml);
     if book.cover.is_none() && book.blocks.is_empty() {
         return Err(ConversionError::NoContent);
     }

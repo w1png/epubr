@@ -45,6 +45,44 @@ fn model_and_ocr_flags_accept_the_documented_choices() {
 }
 
 #[test]
+fn mathml_flag_accepts_all_three_modes() {
+    for flag in [
+        "--mathML=enable",
+        "--mathML=disable",
+        "--mathML=fallback",
+        "--mathml=fallback",
+    ] {
+        let output = epubr()
+            .args(["convert", "missing.pdf", "-o", "output.epub"])
+            .arg(flag)
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{flag}: {stderr}");
+        assert!(stderr.contains("input is not a readable PDF"), "{stderr}");
+    }
+}
+
+#[test]
+fn mathml_flag_rejects_invalid_modes_before_opening_input() {
+    let output = epubr()
+        .args([
+            "convert",
+            "missing.pdf",
+            "-o",
+            "output.epub",
+            "--mathML=true",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("enable, disable, fallback"), "{stderr}");
+}
+
+#[test]
 fn convert_preserves_an_existing_destination() {
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("existing.epub");

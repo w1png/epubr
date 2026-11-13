@@ -29,6 +29,7 @@ pub(super) fn enrich(
     input: &Path,
     worker: &ExtractionWorker<'_>,
     models: &PreparedModels,
+    decode_formulas: bool,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress),
 ) -> Result<Vec<String>, ConversionError> {
@@ -36,7 +37,7 @@ pub(super) fn enrich(
         return Ok(Vec::new());
     };
     let regions = texts.iter_mut().filter(|item| {
-        matches!(item["label"].as_str(), Some("formula" | "code"))
+        (item["label"] == "code" || (decode_formulas && item["label"] == "formula"))
             && item["epubr_source_text"] != true
             && item["prov"]
                 .as_array()

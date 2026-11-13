@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::book::{Block, Book, NavEntry};
+use crate::book::{Block, Book, Formula, ListItemContent, NavEntry};
 
 const CONTAINER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -37,6 +37,69 @@ struct Heading<'a> {
     title: &'a str,
 }
 
+#[derive(Default)]
+struct Resources {
+    manifest: String,
+    image_count: usize,
+    fingerprint: Sha256,
+    has_mathml: bool,
+}
+
+impl Resources {
+    fn write_image(
+        &mut self,
+        zip: &mut ZipWriter<&mut File>,
+        media_type: &str,
+        data: &[u8],
+    ) -> io::Result<String> {
+        let extension = image_extension(media_type)?;
+        self.image_count += 1;
+        let number = self.image_count;
+        let href = format!("images/image-{number}.{extension}");
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file(format!("EPUB/{href}"), stored)?;
+        zip.write_all(data)?;
+        self.fingerprint.update(Sha256::digest(data));
+        writeln!(
+            self.manifest,
+            "<item id=\"image-{number}\" href=\"{href}\" media-type=\"{media_type}\"/>"
+        )
+        .unwrap();
+        Ok(href)
+    }
+
+    fn write_formula(
+        &mut self,
+        zip: &mut ZipWriter<&mut File>,
+        content: &mut String,
+        formula: &Formula,
+    ) -> io::Result<()> {
+        match formula {
+            Formula::MathMl { markup, fallback } => {
+                self.has_mathml = true;
+                if let Some(image) = fallback {
+                    let rest = markup.strip_prefix("<math ").ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "expected a MathML root element")
+                    })?;
+                    let href = self.write_image(zip, &image.media_type, &image.data)?;
+                    write!(content, "<math altimg=\"{href}\" {rest}").unwrap();
+                } else {
+                    content.push_str(markup);
+                }
+            }
+            Formula::Image(image) => {
+                let href = self.write_image(zip, &image.media_type, &image.data)?;
+                write!(
+                    content,
+                    "<img src=\"{href}\" alt=\"Equation from source PDF\"/>"
+                )
+                .unwrap();
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     let mut zip = ZipWriter::new(file);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
@@ -52,15 +115,12 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     let mut content = xhtml_start(&book.title, &book.language);
     let headings = navigation_headings(book);
     let contents_headings = book.contents_navigation.as_deref().map(entry_headings);
-    let mut image_manifest = String::new();
-    let mut image_count = 0;
-    let mut has_mathml = false;
-    let mut fingerprint = Sha256::new();
+    let mut resources = Resources::default();
 
     if let Some(cover) = &book.cover {
         zip.start_file("EPUB/cover.png", stored)?;
         zip.write_all(cover)?;
-        fingerprint.update(Sha256::digest(cover));
+        resources.fingerprint.update(Sha256::digest(cover));
         let xhtml = xhtml_start(&book.title, &book.language)
             .replace("<body>", "<body class=\"cover\" epub:type=\"cover\">");
         zip.start_file("EPUB/cover.xhtml", deflated)?;
@@ -71,7 +131,7 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
             )
             .as_bytes(),
         )?;
-        image_manifest.push_str(
+        resources.manifest.push_str(
             "<item id=\"cover-page\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n\
              <item id=\"cover-image\" href=\"cover.png\" media-type=\"image/png\" properties=\"cover-image\"/>\n",
         );
@@ -113,12 +173,18 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 let tag = if *ordered { "ol" } else { "ul" };
                 writeln!(content, "<{tag}>").unwrap();
                 for item in items {
-                    has_mathml |= item.has_mathml;
                     if let Some(number) = item.number.filter(|_| *ordered) {
-                        writeln!(content, "<li value=\"{number}\">{}</li>", item.html).unwrap();
+                        write!(content, "<li value=\"{number}\">").unwrap();
                     } else {
-                        writeln!(content, "<li>{}</li>", item.html).unwrap();
+                        content.push_str("<li>");
                     }
+                    match &item.content {
+                        ListItemContent::Html(html) => content.push_str(html),
+                        ListItemContent::Formula(formula) => {
+                            resources.write_formula(&mut zip, &mut content, formula)?;
+                        }
+                    }
+                    content.push_str("</li>\n");
                 }
                 writeln!(content, "</{tag}>").unwrap();
             }
@@ -130,24 +196,11 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 writeln!(content, "<pre><code>{}</code></pre></figure>", escape(text)).unwrap();
             }
             Block::Figure {
-                media_type, data, ..
-            }
-            | Block::FormulaImage { media_type, data } => {
-                let extension = image_extension(media_type)?;
-                image_count += 1;
-                let href = format!("images/image-{image_count}.{extension}");
-                zip.start_file(format!("EPUB/{href}"), stored)?;
-                zip.write_all(data)?;
-                fingerprint.update(Sha256::digest(data));
-                writeln!(
-                    image_manifest,
-                    "<item id=\"image-{image_count}\" href=\"{href}\" media-type=\"{media_type}\"/>"
-                )
-                .unwrap();
-                let Block::Figure { caption, .. } = block else {
-                    writeln!(content, "<div class=\"formula-image\"><img src=\"{href}\" alt=\"Equation from source PDF\"/></div>").unwrap();
-                    continue;
-                };
+                media_type,
+                data,
+                caption,
+            } => {
+                let href = resources.write_image(&mut zip, media_type, data)?;
                 let caption = escape(caption);
                 let alt = if caption.is_empty() {
                     "Figure"
@@ -168,9 +221,14 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 )
                 .unwrap();
             }
-            Block::Formula { mathml } => {
-                has_mathml = true;
-                writeln!(content, "<div class=\"formula\">\n{mathml}\n</div>").unwrap();
+            Block::Formula(formula) => {
+                let (class, line_break) = match formula {
+                    Formula::MathMl { .. } => ("formula", "\n"),
+                    Formula::Image(_) => ("formula-image", ""),
+                };
+                write!(content, "<div class=\"{class}\">{line_break}").unwrap();
+                resources.write_formula(&mut zip, &mut content, formula)?;
+                writeln!(content, "{line_break}</div>").unwrap();
             }
             Block::Table { rows } => {
                 content.push_str("<table><tbody>\n");
@@ -204,12 +262,12 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     }
 
     content.push_str("</body></html>\n");
-    fingerprint.update(content.as_bytes());
+    resources.fingerprint.update(content.as_bytes());
     for (index, author) in book.authors.iter().enumerate() {
         if index > 0 {
-            fingerprint.update([0]);
+            resources.fingerprint.update([0]);
         }
-        fingerprint.update(author.as_bytes());
+        resources.fingerprint.update(author.as_bytes());
     }
     zip.start_file(format!("EPUB/{CONTENT}"), deflated)?;
     zip.write_all(content.as_bytes())?;
@@ -217,7 +275,15 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     zip.start_file("EPUB/nav.xhtml", deflated)?;
     zip.write_all(navigation(book, &headings).as_bytes())?;
     zip.start_file("EPUB/book.opf", deflated)?;
-    zip.write_all(package(book, &identifier(fingerprint), &image_manifest, has_mathml).as_bytes())?;
+    zip.write_all(
+        package(
+            book,
+            &identifier(resources.fingerprint),
+            &resources.manifest,
+            resources.has_mathml,
+        )
+        .as_bytes(),
+    )?;
     zip.finish()?;
     Ok(())
 }
@@ -432,13 +498,74 @@ fn escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::path::Path;
 
     use lopdf::{Document, Object, dictionary};
     use serde_json::json;
 
     use super::*;
-    use crate::{MetadataOverrides, book};
+    use crate::{
+        MathMlMode, MetadataOverrides, book,
+        book::{ListItem, SourceImage},
+    };
+
+    #[test]
+    fn numbered_mathml_list_item_links_its_packaged_fallback() {
+        let mut book = book::normalize(
+            &json!({}),
+            &Document::new(),
+            Path::new("source.pdf"),
+            MetadataOverrides::default(),
+            MathMlMode::Fallback,
+        );
+        let mut png = io::Cursor::new(Vec::new());
+        image::RgbImage::new(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let data = png.into_inner();
+        book.blocks.push(Block::List {
+            ordered: true,
+            items: vec![ListItem {
+                content: ListItemContent::Formula(Formula::MathMl {
+                    markup: r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi></math>"#
+                        .to_owned(),
+                    fallback: Some(SourceImage {
+                        media_type: "image/png".to_owned(),
+                        data: data.clone(),
+                    }),
+                }),
+                number: Some(7),
+            }],
+        });
+        let mut file = tempfile::tempfile().unwrap();
+        write(&mut file, &book).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let xhtml = io::read_to_string(archive.by_name("EPUB/content.xhtml").unwrap()).unwrap();
+        let doc = roxmltree::Document::parse(&xhtml).unwrap();
+        let math = doc
+            .descendants()
+            .find(|node| node.has_tag_name(("http://www.w3.org/1998/Math/MathML", "math")))
+            .unwrap();
+        let item = math.parent_element().unwrap();
+        assert!(item.has_tag_name("li"));
+        assert_eq!(item.attribute("value"), Some("7"));
+        let manifest = io::read_to_string(archive.by_name("EPUB/book.opf").unwrap()).unwrap();
+        let manifest = roxmltree::Document::parse(&manifest).unwrap();
+        let chapter = manifest
+            .descendants()
+            .find(|node| node.attribute("href") == Some("content.xhtml"))
+            .unwrap();
+        assert_eq!(chapter.attribute("properties"), Some("mathml"));
+        let href = math.attribute("altimg").unwrap();
+        let mut fallback = Vec::new();
+        archive
+            .by_name(&format!("EPUB/{href}"))
+            .unwrap()
+            .read_to_end(&mut fallback)
+            .unwrap();
+        assert_eq!(fallback, data);
+    }
 
     #[test]
     fn package_metadata_uses_overrides_and_retains_the_source_language() {
@@ -468,6 +595,7 @@ mod tests {
                 description: Some("An introduction to <math>.".into()),
                 ..MetadataOverrides::default()
             },
+            MathMlMode::default(),
         );
         let xml = package(&book, "test", "", false);
         let opf = roxmltree::Document::parse(&xml).unwrap();

@@ -45,6 +45,11 @@ epubr convert input.pdf -o output.epub \
 
 - `--mode auto` uses OCR as needed, `--mode text` uses the PDF's text layer,
   and `--mode scan` forces OCR. Use `--pages 24-30` for an inclusive range.
+- `--mathML=enable` (default) writes MathML for equations Epubr can decode and
+  uses images for equations it cannot decode. `--mathML=disable` uses source
+  images for equations. `--mathML=fallback` includes MathML and a source image
+  where available so compatible EPUB readers can show the image if MathML
+  rendering fails.
 - `--model standard` selects layout, tables, and multilingual OCR (about 295 MiB).
   `--model technical` adds code and formula enrichment (about 1.01 GiB total) and is the
   default. Both profiles share cached assets. Technical conversion reports
