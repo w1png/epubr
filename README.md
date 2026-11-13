@@ -29,6 +29,20 @@ formula-heavy range and compare the EPUB with the PDF.
 epubr convert raw/hard.pdf -o hard-technical-preview.epub --model technical --mode auto --pages 172-176
 ```
 
+For an e-ink reader, use the device preset to resize raster images, convert
+them to four-level grayscale, and split long chapters at block boundaries.
+EPUBs with extractable text also include stable reference page data when
+the location file fits within CrossInk’s 64 KiB limit.
+
+```sh
+epubr convert raw/hard.pdf -o hard-x4-pro.epub --optimizeFor=xteink_x4_pro
+```
+
+The available presets are `xteink_x3`, `xteink_x4`, `xteink_x4_pro`, and
+`seeed_studio_sticky`. `xteink_x4_classic` is an alias for `xteink_x4`.
+Optimization runs locally. Top-level chapters are separate reading-order
+documents in every conversion.
+
 Book metadata is automatic by default. Epubr uses embedded PDF metadata,
 recognizable catalog entries and imprint statements in the opening pages,
 and structured filenames such as `Katz J., Lindell Y. - Book, 2nd Edition - 2015.pdf`.

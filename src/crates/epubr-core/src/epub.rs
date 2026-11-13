@@ -1,13 +1,22 @@
+mod locations;
+mod optimizer;
+
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Write};
 use std::iter::Peekable;
+use std::ops::Range;
+use std::sync::LazyLock;
 
 use chrono::{SecondsFormat, Utc};
+use regex::{Captures, Regex};
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+use crate::OptimizationTarget;
 use crate::book::{Block, Book, NavEntry};
 
 const CONTAINER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -30,6 +39,14 @@ th { text-align: start; }
 .contents li { margin-block: 0.35em; }
 "#;
 const CONTENT: &str = "content.xhtml";
+const OPTIMIZED_SECTION_BYTES: usize = 32 * 1024;
+
+// The normalizer generates these IDs and fragment links when pairing notes.
+static NOTE_REFERENCE_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<a id="(noteref-[0-9]+)""#).unwrap());
+static NOTE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r##"(<a (?:id="noteref-[0-9]+" )?href=")#((?:note|noteref)-[0-9]+)"##).unwrap()
+});
 
 struct Heading<'a> {
     level: u8,
@@ -37,7 +54,23 @@ struct Heading<'a> {
     title: &'a str,
 }
 
-pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
+struct RenderedBlock {
+    html: String,
+    has_mathml: bool,
+}
+
+struct Section<'a> {
+    path: String,
+    title: &'a str,
+    blocks: Range<usize>,
+    chapter_group: usize,
+}
+
+pub(crate) fn write(
+    file: &mut File,
+    book: &Book,
+    optimization: Option<OptimizationTarget>,
+) -> io::Result<()> {
     let mut zip = ZipWriter::new(file);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -49,34 +82,48 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
     zip.start_file("EPUB/book.css", deflated)?;
     zip.write_all(STYLES.as_bytes())?;
 
-    let mut content = xhtml_start(&book.title, &book.language);
     let headings = navigation_headings(book);
     let contents_headings = book.contents_navigation.as_deref().map(entry_headings);
-    let mut image_manifest = String::new();
+    let mut manifest = String::new();
+    let mut spine = String::new();
     let mut image_count = 0;
-    let mut has_mathml = false;
     let mut fingerprint = Sha256::new();
+    let mut locations = optimization.map(|_| locations::Locations::default());
 
     if let Some(cover) = &book.cover {
-        zip.start_file("EPUB/cover.png", stored)?;
-        zip.write_all(cover)?;
-        fingerprint.update(Sha256::digest(cover));
-        let xhtml = xhtml_start(&book.title, &book.language)
+        let optimized =
+            optimization.and_then(|target| optimizer::optimize_image(target, "image/png", cover));
+        let (media_type, data) = optimized
+            .as_ref()
+            .map_or(("image/png", cover.as_slice()), |(kind, bytes)| {
+                (*kind, bytes.as_slice())
+            });
+        let extension = image_extension(media_type)?;
+        zip.start_file(format!("EPUB/cover.{extension}"), stored)?;
+        zip.write_all(data)?;
+        fingerprint.update(Sha256::digest(data));
+        let start = xhtml_start(&book.title, &book.language)
             .replace("<body>", "<body class=\"cover\" epub:type=\"cover\">");
-        zip.start_file("EPUB/cover.xhtml", deflated)?;
-        zip.write_all(
-            format!(
-                "{xhtml}<img src=\"cover.png\" alt=\"Cover of {}\"/></body></html>\n",
-                escape(&book.title)
-            )
-            .as_bytes(),
-        )?;
-        image_manifest.push_str(
-            "<item id=\"cover-page\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n\
-             <item id=\"cover-image\" href=\"cover.png\" media-type=\"image/png\" properties=\"cover-image\"/>\n",
+        let xhtml = format!(
+            "{start}<img src=\"cover.{extension}\" alt=\"Cover of {}\"/></body></html>\n",
+            escape(&book.title)
         );
+        zip.start_file("EPUB/cover.xhtml", deflated)?;
+        zip.write_all(xhtml.as_bytes())?;
+        if let Some(locations) = &mut locations {
+            locations.push("EPUB/cover.xhtml", &xhtml, 0)?;
+        }
+        writeln!(
+            manifest,
+            "<item id=\"cover-page\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n\
+             <item id=\"cover-image\" href=\"cover.{extension}\" media-type=\"{media_type}\" properties=\"cover-image\"/>",
+        ).unwrap();
+        spine.push_str("<itemref idref=\"cover-page\"/>\n");
     }
+    let mut rendered = Vec::with_capacity(book.blocks.len());
     for block in &book.blocks {
+        let mut content = String::new();
+        let mut has_mathml = false;
         match block {
             Block::PageAnchor { page } => {
                 writeln!(content, "<span id=\"source-page-{page}\"></span>").unwrap();
@@ -91,21 +138,7 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 )
                 .unwrap();
             }
-            Block::Contents { title } => {
-                writeln!(
-                    content,
-                    "<nav class=\"contents\" aria-labelledby=\"contents-heading\"><h2 id=\"contents-heading\">{}</h2>",
-                    escape(title)
-                )
-                .unwrap();
-                contents_list(
-                    &mut content,
-                    book,
-                    contents_headings.as_deref().unwrap_or(&headings),
-                    "",
-                );
-                content.push_str("</nav>\n");
-            }
+            Block::Contents { .. } => {} // Contents links need the final document paths.
             Block::Paragraph { html } => {
                 writeln!(content, "<p>{html}</p>").unwrap();
             }
@@ -133,6 +166,13 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 media_type, data, ..
             }
             | Block::FormulaImage { media_type, data } => {
+                let optimized = optimization
+                    .and_then(|target| optimizer::optimize_image(target, media_type, data));
+                let (media_type, data) = optimized
+                    .as_ref()
+                    .map_or((media_type.as_str(), data.as_slice()), |(kind, bytes)| {
+                        (*kind, bytes.as_slice())
+                    });
                 let extension = image_extension(media_type)?;
                 image_count += 1;
                 let href = format!("images/image-{image_count}.{extension}");
@@ -140,25 +180,25 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 zip.write_all(data)?;
                 fingerprint.update(Sha256::digest(data));
                 writeln!(
-                    image_manifest,
+                    manifest,
                     "<item id=\"image-{image_count}\" href=\"{href}\" media-type=\"{media_type}\"/>"
                 )
                 .unwrap();
-                let Block::Figure { caption, .. } = block else {
-                    writeln!(content, "<div class=\"formula-image\"><img src=\"{href}\" alt=\"Equation from source PDF\"/></div>").unwrap();
-                    continue;
-                };
-                let caption = escape(caption);
-                let alt = if caption.is_empty() {
-                    "Figure"
+                if let Block::Figure { caption, .. } = block {
+                    let caption = escape(caption);
+                    let alt = if caption.is_empty() {
+                        "Figure"
+                    } else {
+                        &caption
+                    };
+                    writeln!(content, "<figure><img src=\"{href}\" alt=\"{alt}\"/>").unwrap();
+                    if !caption.is_empty() {
+                        writeln!(content, "<figcaption>{caption}</figcaption>").unwrap();
+                    }
+                    content.push_str("</figure>\n");
                 } else {
-                    &caption
-                };
-                writeln!(content, "<figure><img src=\"{href}\" alt=\"{alt}\"/>").unwrap();
-                if !caption.is_empty() {
-                    writeln!(content, "<figcaption>{caption}</figcaption>").unwrap();
+                    writeln!(content, "<div class=\"formula-image\"><img src=\"{href}\" alt=\"Equation from source PDF\"/></div>").unwrap();
                 }
-                content.push_str("</figure>\n");
             }
             Block::Note { id, html } => {
                 writeln!(
@@ -201,25 +241,182 @@ pub(crate) fn write(file: &mut File, book: &Book) -> io::Result<()> {
                 content.push_str("</tbody></table>\n");
             }
         }
+        rendered.push(RenderedBlock {
+            html: content,
+            has_mathml,
+        });
     }
 
-    content.push_str("</body></html>\n");
-    fingerprint.update(content.as_bytes());
+    let sections = plan_sections(book, &headings, &rendered, optimization.is_some());
+    let targets = index_targets(book, &rendered, &sections);
+    for section in &sections {
+        let mut content = xhtml_start(section.title, &book.language);
+        let mut has_mathml = false;
+        for index in section.blocks.clone() {
+            let block = &rendered[index];
+            has_mathml |= block.has_mathml;
+            if let Block::Contents { title } = &book.blocks[index] {
+                writeln!(
+                    content,
+                    "<nav class=\"contents\" aria-labelledby=\"contents-heading\"><h2 id=\"contents-heading\">{}</h2>",
+                    escape(title)
+                )
+                .unwrap();
+                contents_list(
+                    &mut content,
+                    book,
+                    contents_headings.as_deref().unwrap_or(&headings),
+                    &targets,
+                    &section.path,
+                );
+                content.push_str("</nav>\n");
+            } else {
+                let html = NOTE_LINK.replace_all(&block.html, |captures: &Captures<'_>| {
+                    let id = &captures[2];
+                    let target = targets.get(id).copied().unwrap_or(&section.path);
+                    format!(
+                        "{}{}#{id}",
+                        &captures[1],
+                        relative_path(&section.path, target)
+                    )
+                });
+                content.push_str(&html);
+            }
+        }
+        content.push_str("</body></html>\n");
+        fingerprint.update(content.as_bytes());
+        let path = format!("EPUB/{}", section.path);
+        zip.start_file(&path, deflated)?;
+        zip.write_all(content.as_bytes())?;
+        if let Some(locations) = &mut locations {
+            locations.push(&path, &content, section.chapter_group)?;
+        }
+        let id = section.path.trim_end_matches(".xhtml");
+        let properties = if has_mathml {
+            r#" properties="mathml""#
+        } else {
+            ""
+        };
+        writeln!(
+            manifest,
+            "<item id=\"{id}\" href=\"{}\" media-type=\"application/xhtml+xml\"{properties}/>",
+            section.path
+        )
+        .unwrap();
+        writeln!(spine, "<itemref idref=\"{id}\"/>").unwrap();
+    }
     for (index, author) in book.authors.iter().enumerate() {
         if index > 0 {
             fingerprint.update([0]);
         }
         fingerprint.update(author.as_bytes());
     }
-    zip.start_file(format!("EPUB/{CONTENT}"), deflated)?;
-    zip.write_all(content.as_bytes())?;
-
     zip.start_file("EPUB/nav.xhtml", deflated)?;
-    zip.write_all(navigation(book, &headings).as_bytes())?;
+    zip.write_all(navigation(book, &headings, &targets).as_bytes())?;
     zip.start_file("EPUB/book.opf", deflated)?;
-    zip.write_all(package(book, &identifier(fingerprint), &image_manifest, has_mathml).as_bytes())?;
+    zip.write_all(package(book, &identifier(fingerprint), &manifest, &spine).as_bytes())?;
+    if let (Some(target), Some(locations)) = (optimization, locations) {
+        let data = locations.finish()?;
+        zip.start_file(locations::OPTIMIZER_PATH, stored)?;
+        zip.write_all(&locations::optimizer_manifest(target, data.is_some())?)?;
+        if let Some(data) = data {
+            zip.start_file(locations::LOCATION_PATH, stored)?;
+            zip.write_all(&data)?;
+        }
+    }
     zip.finish()?;
     Ok(())
+}
+
+fn plan_sections<'a>(
+    book: &'a Book,
+    headings: &[Heading<'a>],
+    rendered: &[RenderedBlock],
+    optimize: bool,
+) -> Vec<Section<'a>> {
+    let mut root_level = u8::MAX;
+    let mut chapter_titles = HashMap::new();
+    for heading in headings {
+        // Match the root entries emitted by nav_list, including a TOC whose
+        // first entries start at a deeper level than the later ones.
+        if heading.level <= root_level {
+            root_level = heading.level;
+            chapter_titles.entry(heading.id).or_insert(heading.title);
+        }
+    }
+
+    let mut sections = Vec::new();
+    let mut title = book.title.as_str();
+    let mut chapter_group = 1;
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, (block, rendered)) in book.blocks.iter().zip(rendered).enumerate() {
+        let chapter = block_id(block).and_then(|id| chapter_titles.get(id.as_ref()).copied());
+        if index > start
+            && (chapter.is_some()
+                || (optimize && bytes + rendered.html.len() > OPTIMIZED_SECTION_BYTES))
+        {
+            sections.push(Section {
+                path: section_path(sections.len()),
+                title,
+                blocks: start..index,
+                chapter_group,
+            });
+            start = index;
+            bytes = 0;
+        }
+        if let Some(chapter) = chapter {
+            title = chapter;
+            chapter_group += 1;
+        }
+        bytes += rendered.html.len();
+    }
+    sections.push(Section {
+        path: section_path(sections.len()),
+        title,
+        blocks: start..book.blocks.len(),
+        chapter_group,
+    });
+    sections
+}
+
+fn section_path(index: usize) -> String {
+    if index == 0 {
+        CONTENT.to_owned()
+    } else {
+        format!("chapter-{index}.xhtml")
+    }
+}
+
+fn block_id(block: &Block) -> Option<Cow<'_, str>> {
+    match block {
+        Block::Heading { id, .. } | Block::Note { id, .. } => Some(Cow::Borrowed(id)),
+        Block::PageAnchor { page } => Some(Cow::Owned(format!("source-page-{page}"))),
+        _ => None,
+    }
+}
+
+fn index_targets<'a>(
+    book: &Book,
+    rendered: &[RenderedBlock],
+    sections: &'a [Section<'_>],
+) -> HashMap<String, &'a str> {
+    let mut targets = HashMap::new();
+    for section in sections {
+        for index in section.blocks.clone() {
+            if let Some(id) = block_id(&book.blocks[index]) {
+                targets.insert(id.into_owned(), section.path.as_str());
+            }
+            for captures in NOTE_REFERENCE_ID.captures_iter(&rendered[index].html) {
+                targets.insert(captures[1].to_owned(), section.path.as_str());
+            }
+        }
+    }
+    targets
+}
+
+fn relative_path<'a>(from: &str, to: &'a str) -> &'a str {
+    if from == to { "" } else { to }
 }
 
 fn image_extension(media_type: &str) -> io::Result<&'static str> {
@@ -248,10 +445,10 @@ fn xhtml_start(title: &str, language: &str) -> String {
     )
 }
 
-fn navigation(book: &Book, headings: &[Heading<'_>]) -> String {
+fn navigation(book: &Book, headings: &[Heading<'_>], targets: &HashMap<String, &str>) -> String {
     let mut nav = xhtml_start(&book.title, &book.language);
     nav.push_str("<nav epub:type=\"toc\" id=\"toc\"><h1>Contents</h1>\n");
-    contents_list(&mut nav, book, headings, CONTENT);
+    contents_list(&mut nav, book, headings, targets, "nav.xhtml");
     nav.push_str("</nav>\n</body></html>\n");
     nav
 }
@@ -285,23 +482,36 @@ fn entry_headings(entries: &[NavEntry]) -> Vec<Heading<'_>> {
         .collect()
 }
 
-fn contents_list(nav: &mut String, book: &Book, headings: &[Heading<'_>], path: &str) {
+fn contents_list(
+    nav: &mut String,
+    book: &Book,
+    headings: &[Heading<'_>],
+    targets: &HashMap<String, &str>,
+    current_path: &str,
+) {
     if headings.is_empty() {
         writeln!(
             nav,
-            "<ol><li><a href=\"{path}\">{}</a></li></ol>",
+            "<ol><li><a href=\"{CONTENT}\">{}</a></li></ol>",
             escape(&book.title)
         )
         .unwrap();
     } else {
-        nav_list(nav, &mut headings.iter().peekable(), path, 0);
+        nav_list(
+            nav,
+            &mut headings.iter().peekable(),
+            targets,
+            current_path,
+            0,
+        );
     }
 }
 
 fn nav_list(
     nav: &mut String,
     headings: &mut Peekable<std::slice::Iter<'_, Heading<'_>>>,
-    path: &str,
+    targets: &HashMap<String, &str>,
+    current_path: &str,
     parent_level: u8,
 ) {
     nav.push_str("<ol>\n");
@@ -310,6 +520,8 @@ fn nav_list(
         .is_some_and(|heading| heading.level > parent_level)
     {
         let heading = headings.next().expect("checked next heading");
+        let target = targets.get(heading.id).copied().unwrap_or(CONTENT);
+        let path = relative_path(current_path, target);
         writeln!(
             nav,
             "<li><a href=\"{path}#{}\">{}</a>",
@@ -321,14 +533,14 @@ fn nav_list(
             .peek()
             .is_some_and(|next| next.level > heading.level)
         {
-            nav_list(nav, headings, path, heading.level);
+            nav_list(nav, headings, targets, current_path, heading.level);
         }
         nav.push_str("</li>\n");
     }
     nav.push_str("</ol>\n");
 }
 
-fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> String {
+fn package(book: &Book, id: &str, manifest: &str, spine: &str) -> String {
     let title = escape(&book.title);
     let language = escape(&book.language);
     let mut metadata = String::new();
@@ -363,16 +575,6 @@ fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> Str
         .unwrap();
     }
     let modified = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    let properties = if has_mathml {
-        r#" properties="mathml""#
-    } else {
-        ""
-    };
-    let cover = if book.cover.is_some() {
-        r#"<itemref idref="cover-page"/>"#
-    } else {
-        ""
-    };
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="publication-id">
@@ -383,12 +585,11 @@ fn package(book: &Book, id: &str, image_manifest: &str, has_mathml: bool) -> Str
 {metadata}  <meta property="dcterms:modified">{modified}</meta>
 </metadata>
 <manifest>
-  <item id="content" href="{CONTENT}" media-type="application/xhtml+xml"{properties}/>
   <item id="navigation" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
   <item id="stylesheet" href="book.css" media-type="text/css"/>
-  {image_manifest}
+  {manifest}
 </manifest>
-<spine>{cover}<itemref idref="content"/></spine>
+<spine>{spine}</spine>
 </package>
 "#
     )
@@ -431,6 +632,10 @@ fn escape(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "epub/tests/chapter_documents.rs"]
+mod chapter_documents;
+
+#[cfg(test)]
 mod tests {
     use std::path::Path;
 
@@ -469,7 +674,7 @@ mod tests {
                 ..MetadataOverrides::default()
             },
         );
-        let xml = package(&book, "test", "", false);
+        let xml = package(&book, "test", "", "");
         let opf = roxmltree::Document::parse(&xml).unwrap();
         let values = |name| {
             opf.descendants()

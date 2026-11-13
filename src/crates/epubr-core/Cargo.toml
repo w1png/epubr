@@ -10,7 +10,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 directories-next = "2.0"
 docling = { version = "=2.65.1", default-features = false, features = ["pdf"] }
 docling-pdf = { version = "=2.65.1", default-features = false, features = ["render"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lopdf = { version = "0.45", default-features = false }
 regex = "1"
 roxmltree = "0.21"

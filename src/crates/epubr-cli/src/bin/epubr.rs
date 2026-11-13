@@ -4,11 +4,11 @@ use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 use std::sync::Arc;
 use std::thread;
 
-use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use epubr_core::{
     CancellationToken, ConversionError, ConversionOptions, ConversionSettings,
     EXTRACTION_WORKER_FLAG, ExtractionWorker, MetadataOverrides, ModelConfig, ModelProfile,
-    convert_with_worker_metadata, is_language_tag, run_extraction_worker,
+    OptimizationTarget, convert_with_worker_metadata, is_language_tag, run_extraction_worker,
 };
 
 #[path = "../common.rs"]
@@ -66,12 +66,39 @@ struct ConvertArgs {
     #[arg(long, value_parser = parse_pages)]
     pages: Option<(usize, usize)>,
 
+    /// Optimize images and long sections for a target e-reader.
+    #[arg(long = "optimizeFor", alias = "optimize-for", value_enum)]
+    optimize_for: Option<ReaderTarget>,
+
     /// Suppress progress messages.
     #[arg(long)]
     quiet: bool,
 
     #[command(flatten, next_help_heading = "Book metadata")]
     metadata: MetadataArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ReaderTarget {
+    #[value(name = "xteink_x3")]
+    XteinkX3,
+    #[value(name = "xteink_x4", alias = "xteink_x4_classic")]
+    XteinkX4,
+    #[value(name = "xteink_x4_pro")]
+    XteinkX4Pro,
+    #[value(name = "seeed_studio_sticky", alias = "seeed_sticky")]
+    SeeedStudioSticky,
+}
+
+impl From<ReaderTarget> for OptimizationTarget {
+    fn from(value: ReaderTarget) -> Self {
+        match value {
+            ReaderTarget::XteinkX3 => Self::XteinkX3,
+            ReaderTarget::XteinkX4 => Self::XteinkX4,
+            ReaderTarget::XteinkX4Pro => Self::XteinkX4Pro,
+            ReaderTarget::SeeedStudioSticky => Self::SeeedStudioSticky,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -222,6 +249,7 @@ fn convert(args: ConvertArgs, debug: bool) -> Result<(), ConversionError> {
                     mode: args.mode.into(),
                     pages: args.pages,
                 },
+                optimization: args.optimize_for.map(OptimizationTarget::from),
                 metadata: MetadataOverrides {
                     title: args.metadata.title,
                     authors: args.metadata.authors,

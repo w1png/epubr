@@ -45,6 +45,45 @@ fn model_and_ocr_flags_accept_the_documented_choices() {
 }
 
 #[test]
+fn optimize_for_accepts_all_supported_readers() {
+    for target in [
+        "xteink_x3",
+        "xteink_x4",
+        "xteink_x4_pro",
+        "seeed_studio_sticky",
+    ] {
+        let output = epubr()
+            .args(["convert", "missing.pdf", "-o", "output.epub"])
+            .arg(format!("--optimizeFor={target}"))
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{target}: {stderr}");
+        assert!(stderr.contains("input is not a readable PDF"), "{stderr}");
+    }
+}
+
+#[test]
+fn optimize_for_rejects_unknown_readers_before_opening_input() {
+    let output = epubr()
+        .args([
+            "convert",
+            "missing.pdf",
+            "-o",
+            "output.epub",
+            "--optimizeFor=unknown-reader",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--optimizeFor"), "{stderr}");
+    assert!(stderr.contains("unknown-reader"), "{stderr}");
+}
+
+#[test]
 fn convert_preserves_an_existing_destination() {
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("existing.epub");

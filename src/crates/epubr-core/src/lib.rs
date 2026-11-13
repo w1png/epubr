@@ -9,8 +9,8 @@ mod models;
 #[doc(hidden)]
 pub use book::is_language_tag;
 pub use conversion::{
-    CancellationToken, ConversionError, ConversionOptions, ConversionReport, convert,
-    convert_with_models, convert_with_worker,
+    CancellationToken, ConversionError, ConversionOptions, ConversionReport, OptimizationTarget,
+    convert, convert_with_models, convert_with_worker,
 };
 #[doc(hidden)]
 pub use conversion::{

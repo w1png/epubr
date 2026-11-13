@@ -16,6 +16,15 @@ pub struct ConversionOptions {
     pub pages: Option<(usize, usize)>,
 }
 
+/// E-reader profile for optimizing generated EPUBs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OptimizationTarget {
+    XteinkX3,
+    XteinkX4,
+    XteinkX4Pro,
+    SeeedStudioSticky,
+}
+
 /// Explicit metadata for the generated EPUB. Omitted fields are inferred.
 #[derive(Debug, Default)]
 pub struct MetadataOverrides {
@@ -34,6 +43,7 @@ pub struct MetadataOverrides {
 pub struct ConversionSettings {
     pub options: ConversionOptions,
     pub metadata: MetadataOverrides,
+    pub optimization: Option<OptimizationTarget>,
 }
 
 #[derive(Debug, Default)]
@@ -210,7 +220,11 @@ fn convert_inner(
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<ConversionReport, ConversionError> {
-    let ConversionSettings { options, metadata } = settings;
+    let ConversionSettings {
+        options,
+        metadata,
+        optimization,
+    } = settings;
     cancellation.check()?;
     match output.symlink_metadata() {
         Ok(_) => return Err(ConversionError::DestinationExists),
@@ -263,7 +277,7 @@ fn convert_inner(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut staged = NamedTempFile::new_in(parent)?;
-    crate::epub::write(staged.as_file_mut(), &book)?;
+    crate::epub::write(staged.as_file_mut(), &book, optimization)?;
     staged.as_file().sync_all()?;
     cancellation.check()?;
     staged.persist_noclobber(output).map_err(|failure| {

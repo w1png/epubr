@@ -63,7 +63,7 @@ fn preserves_unicode_and_joins_only_the_wrapped_word() {
 }
 
 #[test]
-fn chapter_navigation_nests_subsections_and_links_to_readable_content() {
+fn top_level_chapters_have_distinct_spine_documents() {
     let epub = convert_fixture("basic.pdf", text_mode(), |_| {});
     let navigation = parse_xml(&epub.navigation.xml, &epub.navigation.path);
     let toc = navigation
@@ -90,25 +90,39 @@ fn chapter_navigation_nests_subsections_and_links_to_readable_content() {
     assert!(subsection.ancestors().any(|node| node == first_item));
     assert!(!second.ancestors().any(|node| node == first_item));
 
-    for anchor in [first, subsection, second] {
-        let href = anchor.attribute("href").expect("navigation link target");
-        let (path, fragment) = resolve_href(&epub.navigation.path, href);
-        let chapter = epub
-            .spine
-            .iter()
-            .find(|item| item.path == path)
-            .expect("navigation target is in spine");
-        let document = parse_xml(&chapter.xml, &chapter.path);
-        if let Some(fragment) = fragment {
-            assert!(
-                document
-                    .descendants()
-                    .any(|node| node.attribute("id") == Some(fragment.as_str())),
-                "missing navigation fragment {fragment}"
-            );
-        }
-        assert!(element_text(document.root_element()).contains(element_text(anchor).trim()));
-    }
+    let [first_document, subsection_document, second_document] =
+        [first, subsection, second].map(|anchor| {
+            let href = anchor.attribute("href").expect("navigation link target");
+            let (path, fragment) = resolve_href(&epub.navigation.path, href);
+            let index = epub
+                .spine
+                .iter()
+                .position(|item| item.path == path)
+                .expect("navigation target is in spine");
+            let chapter = &epub.spine[index];
+            let document = parse_xml(&chapter.xml, &chapter.path);
+            if let Some(fragment) = fragment {
+                assert!(
+                    document
+                        .descendants()
+                        .any(|node| node.attribute("id") == Some(fragment.as_str())),
+                    "missing navigation fragment {fragment}"
+                );
+            }
+            assert!(element_text(document.root_element()).contains(element_text(anchor).trim()));
+            index
+        });
+    assert_eq!(first_document, subsection_document);
+    assert!(
+        first_document < second_document,
+        "chapters need distinct spine documents in reading order"
+    );
+    let first_xml = &epub.spine[first_document].xml;
+    let second_xml = &epub.spine[second_document].xml;
+    assert!(first_xml.contains("First page opening."));
+    assert!(!first_xml.contains("Second page closing."));
+    assert!(second_xml.contains("Second page closing."));
+    assert!(!second_xml.contains("First page opening."));
 }
 
 #[test]
