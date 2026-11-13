@@ -909,7 +909,13 @@ mod tests {
             .collect();
         let mut doc = json!({"body": {"children": children}, "texts": texts});
         let normalize = |doc: &Value| {
-            super::super::normalize(doc, &pdf, Path::new("missing.pdf"), Default::default())
+            super::super::normalize(
+                doc,
+                &pdf,
+                Path::new("missing.pdf"),
+                Default::default(),
+                Default::default(),
+            )
         };
         let book = normalize(&doc);
         let reader = &book.navigation;

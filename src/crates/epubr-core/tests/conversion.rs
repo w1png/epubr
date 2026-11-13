@@ -3,9 +3,12 @@ mod support;
 use std::path::Path;
 use std::sync::Mutex;
 
-use epubr_core::{CancellationToken, ConversionOptions, OcrMode, Progress, convert};
+use epubr_core::{
+    CancellationToken, ConversionOptions, ConversionSettings, ExtractionWorker, MathMlMode,
+    ModelConfig, OcrMode, Progress, convert, convert_with_worker_metadata,
+};
 use roxmltree::Node;
-use support::{EPUB, Epub, element_text, parse_xml, resolve_href};
+use support::{EPUB, Epub, XHTML, element_text, parse_xml, resolve_href};
 
 const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
 
@@ -14,21 +17,49 @@ fn convert_fixture(
     options: ConversionOptions,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Epub {
+    convert_fixture_with(fixture, |input, output| {
+        convert(
+            input,
+            output,
+            options,
+            &CancellationToken::default(),
+            on_progress,
+        )
+        .unwrap_or_else(|error| panic!("conversion of {fixture} should succeed: {error}"));
+    })
+}
+
+fn convert_fixture_with(fixture: &str, run: impl FnOnce(&Path, &Path)) -> Epub {
     let input = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(fixture);
     assert!(input.is_file(), "missing fixture {}", input.display());
     let destination = tempfile::tempdir().unwrap();
     let output = destination.path().join("converted book.epub");
-    convert(
-        &input,
-        &output,
-        options,
-        &CancellationToken::default(),
-        on_progress,
-    )
-    .unwrap_or_else(|error| panic!("conversion of {fixture} should succeed: {error}"));
+    run(&input, &output);
     Epub::open(&output)
+}
+
+fn convert_math_fixture(math_ml: MathMlMode) -> Epub {
+    convert_fixture_with("math.pdf", |input, output| {
+        convert_with_worker_metadata(
+            input,
+            output,
+            ConversionSettings {
+                options: text_mode(),
+                math_ml,
+                ..ConversionSettings::default()
+            },
+            &ModelConfig::from_env().unwrap(),
+            &ExtractionWorker {
+                executable: Path::new(env!("CARGO_BIN_EXE_epubr-extract-worker")),
+                setup: &|_| Ok(()),
+            },
+            &CancellationToken::default(),
+            |_| {},
+        )
+        .unwrap_or_else(|error| panic!("conversion of math.pdf in {math_ml:?} mode: {error}"));
+    })
 }
 
 fn text_mode() -> ConversionOptions {
@@ -217,6 +248,7 @@ fn mathml_preserves_the_negation_overbar_without_duplicate_text() {
         let document = parse_xml(&content.xml, &content.path);
         document.descendants().any(|math| {
             math.has_tag_name((MATHML_NS, "math"))
+                && math.attribute("altimg").is_none()
                 && math
                     .descendants()
                     .filter(|node| node.has_tag_name((MATHML_NS, "mo")) || node.has_tag_name((MATHML_NS, "mi")))
@@ -236,12 +268,88 @@ fn mathml_preserves_the_negation_overbar_without_duplicate_text() {
     });
     assert!(
         has_overbar,
-        "expected Presentation MathML with an overbar above A"
+        "expected Presentation MathML with an overbar above A and no fallback image"
     );
     let text = epub.spine_text();
     let raw_expression =
         text.contains(r"\overline") || text.contains(r"\bar") || text.contains("A\u{0305}");
     assert!(!raw_expression, "EPUB duplicated the MathML as raw text");
+}
+
+#[test]
+fn disabling_mathml_packages_the_formula_as_an_image() {
+    let epub = convert_math_fixture(MathMlMode::Disable);
+    assert!(epub.manifest.iter().all(|resource| {
+        !resource
+            .properties
+            .split_whitespace()
+            .any(|property| property == "mathml")
+    }));
+
+    let mut has_formula_image = false;
+    for content in &epub.spine {
+        let document = parse_xml(&content.xml, &content.path);
+        assert!(
+            !document
+                .descendants()
+                .any(|node| node.has_tag_name((MATHML_NS, "math")))
+        );
+        for image in document.descendants().filter(|node| {
+            node.has_tag_name((XHTML, "img"))
+                && node
+                    .parent_element()
+                    .and_then(|parent| parent.attribute("class"))
+                    == Some("formula-image")
+        }) {
+            assert_packaged_image(&epub, &content.path, image.attribute("src").unwrap());
+            has_formula_image = true;
+        }
+    }
+    assert!(
+        has_formula_image,
+        "expected an image for the source formula"
+    );
+}
+
+#[test]
+fn mathml_fallback_packages_an_image_for_the_native_formula() {
+    let epub = convert_math_fixture(MathMlMode::Fallback);
+
+    let mut has_formula = false;
+    for content in &epub.spine {
+        let document = parse_xml(&content.xml, &content.path);
+        for math in document
+            .descendants()
+            .filter(|node| node.has_tag_name((MATHML_NS, "math")))
+        {
+            let image = math
+                .attribute("altimg")
+                .expect("expected a fallback for the native formula");
+            assert_packaged_image(&epub, &content.path, image);
+            has_formula |= math
+                .descendants()
+                .any(|node| node.has_tag_name((MATHML_NS, "mover")));
+        }
+    }
+    assert!(has_formula, "expected native MathML for the source overbar");
+}
+
+fn assert_packaged_image(epub: &Epub, content_path: &str, href: &str) {
+    let (path, fragment) = resolve_href(content_path, href);
+    assert!(fragment.is_none(), "image href has a fragment: {href}");
+    assert!(
+        epub.manifest
+            .iter()
+            .any(|resource| resource.path == path && resource.media_type == "image/png"),
+        "PNG image {path} is missing from the manifest"
+    );
+    let pixels = image::load_from_memory_with_format(epub.resource(&path), image::ImageFormat::Png)
+        .unwrap_or_else(|error| panic!("decoding formula image {path}: {error}"))
+        .into_luma8();
+    assert!(
+        pixels.iter().any(|&value| value < 128),
+        "image {path} contains no ink"
+    );
 }
 
 #[test]

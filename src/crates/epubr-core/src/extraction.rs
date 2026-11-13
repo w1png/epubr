@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    CancellationToken, ConversionError, Extracted, ExtractionError, ExtractionOptions, ModelConfig,
-    ModelError, ModelProfile, OcrMode, PreparedModels, Progress, extract_profile,
+    CancellationToken, ConversionError, ConversionSettings, Extracted, ExtractionError,
+    ExtractionOptions, MathMlMode, ModelConfig, ModelError, ModelProfile, OcrMode, PreparedModels,
+    Progress, extract_profile,
 };
 
 const WORKER_NAME: &str = "epubr-extract-worker";
@@ -65,12 +66,13 @@ enum WorkerMessage {
 pub(crate) fn extract_for_conversion(
     input: &Path,
     pdf: &lopdf::Document,
-    options: ExtractionOptions,
+    settings: &ConversionSettings,
     models: &ModelConfig,
     worker: Option<&ExtractionWorker<'_>>,
     cancellation: &CancellationToken,
     on_progress: impl Fn(Progress) + Sync,
 ) -> Result<(Value, Vec<String>), ConversionError> {
+    let options = settings.options;
     let input = input.canonicalize().map_err(ConversionError::Io)?;
     let executable = match worker {
         Some(worker) => worker.executable.canonicalize()?,
@@ -102,12 +104,14 @@ pub(crate) fn extract_for_conversion(
         serde_json::from_str(&extracted.json).map_err(ConversionError::Document)?;
     crate::book::locate_placeholders(&mut document, &input);
     let warnings = if models.profile == ModelProfile::Technical {
-        crate::book::recover_source_regions(&mut document, pdf, &input);
+        let decode_formulas = settings.math_ml != MathMlMode::Disable;
+        crate::book::recover_source_regions(&mut document, pdf, &input, decode_formulas);
         enrichment::enrich(
             &mut document,
             &input,
             &worker,
             &prepared,
+            decode_formulas,
             cancellation,
             on_progress,
         )?

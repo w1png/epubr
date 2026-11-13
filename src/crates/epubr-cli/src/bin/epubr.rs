@@ -4,11 +4,11 @@ use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 use std::sync::Arc;
 use std::thread;
 
-use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use epubr_core::{
     CancellationToken, ConversionError, ConversionOptions, ConversionSettings,
-    EXTRACTION_WORKER_FLAG, ExtractionWorker, MetadataOverrides, ModelConfig, ModelProfile,
-    convert_with_worker_metadata, is_language_tag, run_extraction_worker,
+    EXTRACTION_WORKER_FLAG, ExtractionWorker, MathMlMode, MetadataOverrides, ModelConfig,
+    ModelProfile, convert_with_worker_metadata, is_language_tag, run_extraction_worker,
 };
 
 #[path = "../common.rs"]
@@ -66,12 +66,41 @@ struct ConvertArgs {
     #[arg(long, value_parser = parse_pages)]
     pages: Option<(usize, usize)>,
 
+    /// Control MathML and source images for equations.
+    #[arg(
+        long = "mathML",
+        visible_alias = "mathml",
+        value_enum,
+        default_value = "enable"
+    )]
+    math_ml: MathMl,
+
     /// Suppress progress messages.
     #[arg(long)]
     quiet: bool,
 
     #[command(flatten, next_help_heading = "Book metadata")]
     metadata: MetadataArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum MathMl {
+    /// Write MathML where possible and use an image if decoding fails.
+    Enable,
+    /// Write equations as images cropped from the source PDF.
+    Disable,
+    /// Add source images as fallbacks for compatible EPUB readers.
+    Fallback,
+}
+
+impl From<MathMl> for MathMlMode {
+    fn from(value: MathMl) -> Self {
+        match value {
+            MathMl::Enable => Self::Enable,
+            MathMl::Disable => Self::Disable,
+            MathMl::Fallback => Self::Fallback,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -222,6 +251,7 @@ fn convert(args: ConvertArgs, debug: bool) -> Result<(), ConversionError> {
                     mode: args.mode.into(),
                     pages: args.pages,
                 },
+                math_ml: args.math_ml.into(),
                 metadata: MetadataOverrides {
                     title: args.metadata.title,
                     authors: args.metadata.authors,
