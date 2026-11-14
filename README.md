@@ -15,18 +15,33 @@ just install
 
 ## Examples
 
+Pass the source path with `--input PATH` or `--input=PATH`. Use `--output`
+or `-o` to set the destination. `convert` requires both paths, and `optimize`
+can infer the destination from the input filename.
+
+Use `--help` or `-h` to see the options for each command. If you omit a required
+option, Epubr prints the full command help to stderr and exits with status 2.
+Use `--version` or `-V` to see the installed version.
+
+```sh
+epubr --help
+epubr convert --help
+epubr optimize --help
+```
+
 For a formula-heavy technical book, use the technical model for formula
 enrichment and automatic OCR for pages that need it.
 
 ```sh
-epubr convert raw/hard.pdf -o hard-technical.epub --model technical --mode auto
+epubr convert --input raw/hard.pdf --output hard-technical.epub --model technical --mode auto
 ```
 
 To check equation fidelity before converting the whole book, preview a
 formula-heavy range and compare the EPUB with the PDF.
 
 ```sh
-epubr convert raw/hard.pdf -o hard-technical-preview.epub --model technical --mode auto --pages 172-176
+epubr convert --input raw/hard.pdf --output hard-technical-preview.epub \
+  --model technical --mode auto --pages 172-176
 ```
 
 For an e-ink reader, use the device preset to resize raster images, convert
@@ -35,25 +50,26 @@ EPUBs with extractable text also include stable reference page data when
 the location file fits within CrossInk’s 64 KiB limit.
 
 ```sh
-epubr convert raw/hard.pdf -o hard-x4-pro.epub --optimizeFor=xteink_x4_pro
+epubr convert --input raw/hard.pdf --output hard-x4-pro.epub --optimizeFor=xteink_x4_pro
 ```
 
 The available presets are `xteink_x3`, `xteink_x4`, `xteink_x4_pro`, and
 `seeed_studio_sticky`. `xteink_x4_classic` is an alias for `xteink_x4`.
-Optimization runs locally. Top-level chapters are separate reading-order
-documents in every conversion.
+`--optimize-for` is an alias for `--optimizeFor`. Optimization runs locally.
+Top-level chapters are separate reading-order documents in every conversion.
 
 Use `optimize` with any of the same presets on an existing EPUB. This works
 directly on the EPUB and needs no PDF or Docling models.
 
 ```sh
-epubr optimize hard.epub --optimizeFor=xteink_x4_pro
-epubr optimize hard.epub -o hard-sticky.epub --optimizeFor=seeed_studio_sticky
+epubr optimize --input hard.epub --optimizeFor=xteink_x4_pro
+epubr optimize --input hard.epub --output hard-sticky.epub --optimizeFor=seeed_studio_sticky
 ```
 
-Without `-o`, the first command writes `hard-optimized.epub` beside `hard.epub`.
-Use `-o` to choose another output path. The input stays unchanged, and an
-existing destination is never replaced.
+When you omit `--output`, `optimize` writes `hard-optimized.epub` beside
+`hard.epub`. The optimizer writes a new file and reports an error if the
+destination already exists.
+
 The optimizer preserves images whose filenames are needed by stylesheets or
 responsive image markup. It supports unencrypted, unsigned EPUB files.
 
@@ -65,7 +81,7 @@ Each metadata flag overrides just that field. Repeat `--author` to supply
 the complete author list in order.
 
 ```sh
-epubr convert input.pdf -o output.epub \
+epubr convert --input input.pdf --output output.epub \
   --title "Applied Cryptography Notes" --author "Alex Rivera" --author "Sam Chen" \
   --year 2024 --edition 2 --language en --publisher "Example Press" \
   --description "A reference for engineers."
@@ -90,9 +106,14 @@ epubr convert input.pdf -o output.epub \
   `--debug`.
 
 Use `just release` to build optimized binaries in `target/release`.
-`just debug convert raw/hard.pdf -o hard-preview.epub --pages 172-176` runs a
-short conversion with debug logs. The separate `epubr-docling-probe` binary
-emits Docling JSON for extraction diagnostics.
+For a short conversion with debug logs, run `just debug` with a page range.
+
+```sh
+just debug convert --input raw/hard.pdf --output hard-preview.epub --pages 172-176
+```
+
+The separate `epubr-docling-probe` binary emits Docling JSON for extraction
+diagnostics.
 
 ## Core conversion
 

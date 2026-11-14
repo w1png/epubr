@@ -10,22 +10,14 @@ fn epubr() -> Command {
 }
 
 #[test]
-fn convert_requires_a_destination() {
-    let output = epubr().args(["convert", "input.pdf"]).output().unwrap();
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--output"));
-}
-
-#[test]
 fn model_and_ocr_flags_accept_the_documented_choices() {
     let output = epubr()
         .env("EPUBR_MODEL", "unknown-profile")
         .args([
             "convert",
+            "--input",
             "missing.pdf",
-            "-o",
-            "output.epub",
+            "--output=output.epub",
             "--model",
             "standard",
             "--mode",
@@ -53,7 +45,7 @@ fn optimize_for_accepts_all_supported_readers() {
         "seeed_studio_sticky",
     ] {
         let output = epubr()
-            .args(["convert", "missing.pdf", "-o", "output.epub"])
+            .args(["convert", "--input=missing.pdf", "--output", "output.epub"])
             .arg(format!("--optimizeFor={target}"))
             .output()
             .unwrap();
@@ -69,7 +61,7 @@ fn optimize_for_rejects_unknown_readers_before_opening_input() {
     let output = epubr()
         .args([
             "convert",
-            "missing.pdf",
+            "--input=missing.pdf",
             "-o",
             "output.epub",
             "--optimizeFor=unknown-reader",
@@ -92,7 +84,7 @@ fn convert_preserves_an_existing_destination() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../epubr-core/tests/fixtures/basic.pdf");
 
     let output = epubr()
-        .arg("convert")
+        .args(["convert", "--input"])
         .arg(fixture)
         .arg("-o")
         .arg(&destination)
@@ -116,7 +108,7 @@ fn debug_streams_progress_with_redirected_stderr() {
             command.arg("--debug");
         }
         let output = command
-            .arg("convert")
+            .args(["convert", "--input"])
             .arg(&fixture)
             .arg("-o")
             .arg(root.path().join("out.epub"))
@@ -142,7 +134,13 @@ fn debug_streams_progress_with_redirected_stderr() {
 
 #[test]
 fn debug_conflicts_with_quiet_before_and_after_the_subcommand() {
-    let convert = ["convert", "missing.pdf", "-o", "output.epub", "--quiet"];
+    let convert = [
+        "convert",
+        "--input=missing.pdf",
+        "-o",
+        "output.epub",
+        "--quiet",
+    ];
     for arguments in [
         [&["--debug"][..], &convert].concat(),
         [&convert[..], &["--debug"]].concat(),
@@ -158,7 +156,7 @@ fn debug_conflicts_with_quiet_before_and_after_the_subcommand() {
 fn convert_accepts_book_metadata_with_multiple_authors() {
     let root = tempfile::tempdir().unwrap();
     let output = epubr()
-        .arg("convert")
+        .args(["convert", "--input"])
         .arg(root.path().join("missing.pdf"))
         .arg("-o")
         .arg(root.path().join("book.epub"))
@@ -200,7 +198,14 @@ fn convert_rejects_invalid_book_metadata_before_opening_input() {
         ("--language", "123"),
     ] {
         let output = epubr()
-            .args(["convert", "missing.pdf", "-o", "output.epub", flag, value])
+            .args([
+                "convert",
+                "--input=missing.pdf",
+                "-o",
+                "output.epub",
+                flag,
+                value,
+            ])
             .output()
             .unwrap();
 

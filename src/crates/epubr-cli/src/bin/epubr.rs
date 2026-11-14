@@ -1,10 +1,13 @@
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 use std::sync::Arc;
 use std::thread;
 
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{
+    Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+    error::{ContextKind, ContextValue, ErrorKind},
+};
 use epubr_core::{
     CancellationToken, ConversionError, ConversionOptions, ConversionSettings,
     EXTRACTION_WORKER_FLAG, ExtractionWorker, MetadataOverrides, ModelConfig, ModelProfile,
@@ -25,7 +28,8 @@ const DOCLING_DEBUG: &str = "DOCLING_RS_DEBUG";
 #[derive(Parser)]
 #[command(
     version,
-    about = "Convert technical PDFs and optimize EPUBs for e-readers"
+    about = "Convert technical PDFs and optimize EPUBs for e-readers",
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// Stream all progress and diagnostic logs to stderr.
@@ -46,7 +50,8 @@ enum Command {
 
 #[derive(Args)]
 struct OptimizeArgs {
-    #[arg(value_name = "INPUT")]
+    /// Existing EPUB to optimize.
+    #[arg(long, value_name = "INPUT")]
     input: PathBuf,
 
     /// Output path. Defaults to <input-stem>-optimized.epub beside the input.
@@ -64,9 +69,11 @@ struct OptimizeArgs {
 
 #[derive(Args)]
 struct ConvertArgs {
-    #[arg(value_name = "INPUT")]
+    /// PDF to convert.
+    #[arg(long, value_name = "INPUT")]
     input: PathBuf,
 
+    /// Destination EPUB path.
     #[arg(short = 'o', long, value_name = "OUTPUT")]
     output: PathBuf,
 
@@ -185,6 +192,32 @@ fn parse_language(value: &str) -> Result<String, &'static str> {
     }
 }
 
+fn parse_cli() -> Cli {
+    let mut command = Cli::command();
+    let mut matches = match command.try_get_matches_from_mut(std::env::args_os()) {
+        Ok(matches) => matches,
+        Err(error) => {
+            // The only global option accepted before a subcommand is --debug.
+            let subcommand = std::env::args_os().skip(1).find(|arg| arg != "--debug");
+            if error.kind() == ErrorKind::MissingRequiredArgument
+                && let Some(ContextValue::Strings(missing)) = error.get(ContextKind::InvalidArg)
+                && let Some(help) = subcommand.and_then(|name| command.find_subcommand_mut(name))
+            {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "error: the following required arguments were not provided:\n  {}\n\n{}",
+                    missing.join("\n  "),
+                    help.render_help(),
+                );
+                std::process::exit(error.exit_code());
+            }
+            error.exit();
+        }
+    };
+    Cli::from_arg_matches_mut(&mut matches)
+        .unwrap_or_else(|error| error.format(&mut command).exit())
+}
+
 fn main() -> ExitCode {
     if std::env::args_os().nth(1).as_deref() == Some(EXTRACTION_WORKER_FLAG.as_ref()) {
         if std::env::var_os(DOCLING_DEBUG).as_deref() == Some("1".as_ref()) {
@@ -192,7 +225,7 @@ fn main() -> ExitCode {
         }
         return run_extraction_worker();
     }
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let quiet = match &cli.command {
         Command::Convert(args) => args.quiet,
         Command::Optimize(args) => args.quiet,
