@@ -2,10 +2,10 @@
 
 Epubr is a Rust workspace for converting technical PDFs to reflowable EPUB 3.
 
-The CLI downloads and verifies pinned Docling assets on first use, then reuses
-the verified cache offline. It shows a progress bar with the latest status or
-diagnostic on terminal stderr and publishes the EPUB when conversion succeeds.
-Press Ctrl-C to cancel.
+PDF conversion downloads and verifies pinned Docling assets on first use, then
+reuses the verified cache offline. It shows a progress bar with the latest
+status or diagnostic on terminal stderr and publishes the EPUB when conversion
+succeeds. Press Ctrl-C to cancel.
 
 ```sh
 just build
@@ -42,6 +42,20 @@ The available presets are `xteink_x3`, `xteink_x4`, `xteink_x4_pro`, and
 `seeed_studio_sticky`. `xteink_x4_classic` is an alias for `xteink_x4`.
 Optimization runs locally. Top-level chapters are separate reading-order
 documents in every conversion.
+
+Use `optimize` with any of the same presets on an existing EPUB. This works
+directly on the EPUB and needs no PDF or Docling models.
+
+```sh
+epubr optimize hard.epub --optimizeFor=xteink_x4_pro
+epubr optimize hard.epub -o hard-sticky.epub --optimizeFor=seeed_studio_sticky
+```
+
+Without `-o`, the first command writes `hard-optimized.epub` beside `hard.epub`.
+Use `-o` to choose another output path. The input stays unchanged, and an
+existing destination is never replaced.
+The optimizer preserves images whose filenames are needed by stylesheets or
+responsive image markup. It supports unencrypted, unsigned EPUB files.
 
 Book metadata is automatic by default. Epubr uses embedded PDF metadata,
 recognizable catalog entries and imprint statements in the opening pages,
@@ -87,6 +101,9 @@ Use `epubr_core::convert` to read model settings from the environment or
 Both accept a cancellation token and a progress callback. Library consumers can
 build the companion `epubr-extract-worker` or set `EPUBR_EXTRACTION_WORKER` to
 its path. The `epubr` CLI uses the same executable for its worker.
+
+Use `epubr_core::optimize_epub` with input and output paths and an
+`OptimizationTarget` to optimize an existing EPUB.
 
 The end-to-end tests use the pinned model cache. To run them with a
 preinstalled snapshot, set `EPUBR_MODEL_DIR` to the directory containing

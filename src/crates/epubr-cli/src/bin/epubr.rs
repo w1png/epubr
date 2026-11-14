@@ -8,7 +8,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind
 use epubr_core::{
     CancellationToken, ConversionError, ConversionOptions, ConversionSettings,
     EXTRACTION_WORKER_FLAG, ExtractionWorker, MetadataOverrides, ModelConfig, ModelProfile,
-    OptimizationTarget, convert_with_worker_metadata, is_language_tag, run_extraction_worker,
+    OptimizationTarget, convert_with_worker_metadata, is_language_tag, optimize_epub,
+    run_extraction_worker,
 };
 
 #[path = "../common.rs"]
@@ -22,7 +23,10 @@ use progress::Reporter;
 const DOCLING_DEBUG: &str = "DOCLING_RS_DEBUG";
 
 #[derive(Parser)]
-#[command(version, about = "Convert technical PDFs to reflowable EPUB 3")]
+#[command(
+    version,
+    about = "Convert technical PDFs and optimize EPUBs for e-readers"
+)]
 struct Cli {
     /// Stream all progress and diagnostic logs to stderr.
     #[arg(long, global = true)]
@@ -36,6 +40,26 @@ struct Cli {
 enum Command {
     /// Convert a PDF to EPUB.
     Convert(ConvertArgs),
+    /// Optimize an existing EPUB for a target e-reader.
+    Optimize(OptimizeArgs),
+}
+
+#[derive(Args)]
+struct OptimizeArgs {
+    #[arg(value_name = "INPUT")]
+    input: PathBuf,
+
+    /// Output path. Defaults to <input-stem>-optimized.epub beside the input.
+    #[arg(short = 'o', long, value_name = "OUTPUT")]
+    output: Option<PathBuf>,
+
+    /// Select the target e-reader.
+    #[arg(long = "optimizeFor", alias = "optimize-for", value_enum)]
+    optimize_for: ReaderTarget,
+
+    /// Suppress the completion message.
+    #[arg(long)]
+    quiet: bool,
 }
 
 #[derive(Args)]
@@ -169,8 +193,11 @@ fn main() -> ExitCode {
         return run_extraction_worker();
     }
     let cli = Cli::parse();
-    let Command::Convert(args) = cli.command;
-    if cli.debug && args.quiet {
+    let quiet = match &cli.command {
+        Command::Convert(args) => args.quiet,
+        Command::Optimize(args) => args.quiet,
+    };
+    if cli.debug && quiet {
         Cli::command()
             .error(
                 ErrorKind::ArgumentConflict,
@@ -181,17 +208,40 @@ fn main() -> ExitCode {
     if cli.debug {
         enable_debug_logs();
     }
-    match convert(args, cli.debug) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(ConversionError::Cancelled) => {
-            eprintln!("Conversion cancelled");
-            ExitCode::from(130)
-        }
-        Err(error) => {
-            eprintln!("Conversion failed: {error}");
-            ExitCode::FAILURE
-        }
+    match cli.command {
+        Command::Convert(args) => match convert(args, cli.debug) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(ConversionError::Cancelled) => {
+                eprintln!("Conversion cancelled");
+                ExitCode::from(130)
+            }
+            Err(error) => {
+                eprintln!("Conversion failed: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Optimize(args) => optimize(args),
     }
+}
+
+fn optimize(args: OptimizeArgs) -> ExitCode {
+    let output = args.output.or_else(|| {
+        let mut filename = args.input.file_stem()?.to_os_string();
+        filename.push("-optimized.epub");
+        Some(args.input.with_file_name(filename))
+    });
+    let Some(output) = output else {
+        eprintln!("Optimization failed: input path has no filename");
+        return ExitCode::FAILURE;
+    };
+    if let Err(error) = optimize_epub(&args.input, &output, args.optimize_for.into()) {
+        eprintln!("Optimization failed: {error}");
+        return ExitCode::FAILURE;
+    }
+    if !args.quiet {
+        eprintln!("Wrote {}", output.display());
+    }
+    ExitCode::SUCCESS
 }
 
 fn enable_debug_logs() {

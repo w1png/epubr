@@ -1,4 +1,4 @@
-//! PDF extraction and conversion interfaces for Epubr.
+//! PDF extraction, conversion, and EPUB optimization interfaces for Epubr.
 
 mod book;
 mod conversion;
@@ -16,6 +16,7 @@ pub use conversion::{
 pub use conversion::{
     ConversionSettings, MetadataOverrides, convert_with_worker_metadata, convert_with_worker_setup,
 };
+pub use epub::{OptimizeError, optimize_epub};
 #[doc(hidden)]
 pub use extraction::{EXTRACTION_WORKER_FLAG, ExtractionWorker, run_extraction_worker};
 pub use models::{ModelConfig, ModelError, ModelProfile, PreparedModels};

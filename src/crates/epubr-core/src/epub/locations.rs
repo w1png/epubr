@@ -152,7 +152,11 @@ impl Locations {
 }
 
 fn visible_text(xhtml: &str) -> io::Result<String> {
-    let document = Document::parse(xhtml).map_err(io::Error::other)?;
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let document = Document::parse_with_options(xhtml, options).map_err(io::Error::other)?;
     let mut text = String::new();
     if let Some(body) = document
         .root_element()

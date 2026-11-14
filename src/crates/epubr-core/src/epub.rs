@@ -1,5 +1,10 @@
+mod image_references;
 mod locations;
 mod optimizer;
+mod postprocess;
+mod references;
+
+pub use postprocess::{OptimizeError, optimize_epub};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -316,15 +321,25 @@ pub(crate) fn write(
     zip.start_file("EPUB/book.opf", deflated)?;
     zip.write_all(package(book, &identifier(fingerprint), &manifest, &spine).as_bytes())?;
     if let (Some(target), Some(locations)) = (optimization, locations) {
-        let data = locations.finish()?;
-        zip.start_file(locations::OPTIMIZER_PATH, stored)?;
-        zip.write_all(&locations::optimizer_manifest(target, data.is_some())?)?;
-        if let Some(data) = data {
-            zip.start_file(locations::LOCATION_PATH, stored)?;
-            zip.write_all(&data)?;
-        }
+        write_location_files(&mut zip, target, locations, stored)?;
     }
     zip.finish()?;
+    Ok(())
+}
+
+fn write_location_files(
+    zip: &mut ZipWriter<&mut File>,
+    target: OptimizationTarget,
+    locations: locations::Locations,
+    stored: SimpleFileOptions,
+) -> io::Result<()> {
+    let data = locations.finish()?;
+    zip.start_file(locations::OPTIMIZER_PATH, stored)?;
+    zip.write_all(&locations::optimizer_manifest(target, data.is_some())?)?;
+    if let Some(data) = data {
+        zip.start_file(locations::LOCATION_PATH, stored)?;
+        zip.write_all(&data)?;
+    }
     Ok(())
 }
 
